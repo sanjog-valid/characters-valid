@@ -1,5 +1,13 @@
-import { deploymentConfigError, env, isGeminiConfigured, isSupabaseConfigured, missingSupabaseEnv } from "@/lib/env";
-import { analyzeCharacterImage, buildSearchDocument, embedSearchText, normalizeProfile, toVectorLiteral } from "@/lib/gemini";
+import { deploymentConfigError, env, isOpenAIConfigured, missingSupabaseEnv } from "@/lib/env";
+import {
+  analyzeCharacterImage,
+  buildSearchDocument,
+  createFallbackProfile,
+  embedSearchText,
+  isRetryableAIError,
+  normalizeProfile,
+  toVectorLiteral
+} from "@/lib/openai";
 import { addMockCharacter, addMockClient, deleteMockCharacter, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type {
@@ -7,6 +15,7 @@ import type {
   CharacterRecord,
   CharacterStatus,
   ClientRecord,
+  FailedStoredUpload,
   SignedUploadIntent,
   StoredUpload,
   UploadAssignment,
@@ -26,6 +35,10 @@ type CharacterRow = {
   search_document: string;
   similarity?: number;
   error_message?: string | null;
+  processing_attempts?: number | null;
+  processing_locked_at?: string | null;
+  next_process_at?: string | null;
+  analysis_provider?: string | null;
   created_at: string;
   updated_at?: string;
 };
@@ -40,6 +53,18 @@ type CharacterDeleteRow = {
   id: string;
   storage_path: string;
 };
+
+type ProcessingClaimRow = {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  storage_path: string;
+  processing_attempts: number;
+};
+
+const characterSelect =
+  "id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,processing_attempts,processing_locked_at,next_process_at,analysis_provider,created_at,updated_at";
+const maxProcessingAttempts = 5;
 
 export async function listClients(): Promise<ClientRecord[]> {
   const supabase = getSupabaseAdmin();
@@ -88,6 +113,7 @@ export async function listCharacters(input: {
   clientId?: string;
   status?: CharacterStatus | "all";
   limit?: number;
+  includeFailed?: boolean;
 } = {}) {
   const supabase = getSupabaseAdmin();
 
@@ -97,9 +123,9 @@ export async function listCharacters(input: {
 
   let query = supabase
     .from("characters")
-    .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
+    .select(characterSelect)
     .order("created_at", { ascending: false })
-    .limit(input.limit || 80);
+    .limit(input.limit || 120);
 
   if (input.clientId) {
     query = query.eq("client_id", input.clientId);
@@ -107,6 +133,8 @@ export async function listCharacters(input: {
 
   if (input.status && input.status !== "all") {
     query = query.eq("status", input.status);
+  } else if (!input.includeFailed) {
+    query = query.neq("status", "failed");
   }
 
   const { data, error } = await query;
@@ -128,16 +156,16 @@ export async function searchCharacters(input: {
   const supabase = getSupabaseAdmin();
 
   if (!supabase) {
-    return filterLibraryCharacters(searchMockCharacters({ ...input, status: "ready" }), input);
+    return filterLibraryCharacters(searchMockCharacters({ ...input, status: cleanQuery ? "ready" : "all" }), input);
   }
 
   if (!cleanQuery) {
-    const characters = await listCharacters({ clientId: input.clientId, status: "ready" });
+    const characters = await listCharacters({ clientId: input.clientId, status: "all" });
     return filterLibraryCharacters(characters, input);
   }
 
-  if (isGeminiConfigured()) {
-    const embedding = await embedSearchText(cleanQuery, "RETRIEVAL_QUERY");
+  if (isOpenAIConfigured()) {
+    const embedding = await embedSearchText(cleanQuery);
 
     if (embedding) {
       const { data, error } = await supabase.rpc("match_characters", {
@@ -158,7 +186,7 @@ export async function searchCharacters(input: {
 
   let query = supabase
     .from("characters")
-    .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
+    .select(characterSelect)
     .or(`search_document.ilike.%${cleanQuery}%,file_name.ilike.%${cleanQuery}%`)
     .eq("status", "ready")
     .order("created_at", { ascending: false })
@@ -194,7 +222,8 @@ export async function uploadAndProcessCharacters(input: {
           clientId: assignment?.clientId || null,
           fileName: file.name,
           mimeType: file.type || "application/octet-stream",
-          imageUrl
+          imageUrl,
+          status: "processing"
         });
       })
     );
@@ -209,6 +238,7 @@ export async function uploadAndProcessCharacters(input: {
     const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || "application/octet-stream";
     const storagePath = `unassigned/${id}-${safeFileName(file.name)}`;
+    const profile = createFallbackProfile(file.name);
 
     const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, buffer, {
       contentType: mimeType,
@@ -219,88 +249,29 @@ export async function uploadAndProcessCharacters(input: {
       throw new Error(upload.error.message);
     }
 
-    await supabase.from("characters").insert({
-      id,
-      client_id: null,
-      file_name: file.name,
-      mime_type: mimeType,
-      storage_path: storagePath,
-      status: "processing"
-    });
-
-    await supabase.from("processing_events").insert({
-      character_id: id,
-      event_type: "upload_stored",
-      message: "Image uploaded to private storage."
-    });
-
-    try {
-      const profile = await analyzeCharacterImage({ buffer, mimeType, fileName: file.name });
-      const searchDocument = buildSearchDocument(profile, "", file.name);
-      const embedding = await embedSearchText(searchDocument, "RETRIEVAL_DOCUMENT");
-
-      const { data, error } = await supabase
-        .from("characters")
-        .update({
-          status: "ready",
-          profile,
-          search_document: searchDocument,
-          embedding: toVectorLiteral(embedding),
-          error_message: null
-        })
-        .eq("id", id)
-        .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
-        .single();
-
-      if (error) {
-        throw new Error(error.message);
-      }
-
-      await supabase.from("processing_events").insert({
-        character_id: id,
-        event_type: "analysis_ready",
-        message: "AI profile and embedding generated."
-      });
-
-      results.push(await mapCharacterRow(data as CharacterRow));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown processing error.";
-
-      await supabase.from("characters").update({ status: "failed", error_message: message }).eq("id", id);
-      await supabase.from("processing_events").insert({
-        character_id: id,
-        event_type: "analysis_failed",
-        message
-      });
-
-      results.push({
+    const { data, error } = await supabase
+      .from("characters")
+      .insert({
         id,
         client_id: null,
-        client_name: "Unassigned",
         file_name: file.name,
         mime_type: mimeType,
         storage_path: storagePath,
-        image_url: await signedImageUrl(storagePath),
-        status: "failed",
-        profile: {
-          summary: "Processing failed.",
-          apparent_age_range: "unknown",
-          gender_presentation: "unknown",
-          wardrobe: [],
-          dominant_colors: [],
-          expression: "unknown",
-          pose: "unknown",
-          shot_type: "unknown",
-          background: "unknown",
-          style: "unknown",
-          quality_notes: message,
-          searchable_phrases: []
-        },
-        search_document: "",
-        error_message: message,
-        created_at: new Date().toISOString()
-      });
+        status: "processing",
+        profile,
+        search_document: buildSearchDocument(profile, "", file.name),
+        next_process_at: new Date().toISOString(),
+        analysis_provider: "openai"
+      })
+      .select(characterSelect)
+      .single();
+
+    if (error) {
+      throw new Error(error.message);
     }
+
+    await insertProcessingEvent(id, "upload_stored", "Image uploaded to private storage.");
+    results.push(await mapCharacterRow(data as CharacterRow));
   }
 
   return results;
@@ -324,6 +295,7 @@ export async function createSignedUploadIntents(files: UploadIntentFile[]): Prom
   for (const file of validFiles) {
     const id = crypto.randomUUID();
     const storagePath = `unassigned/${id}-${safeFileName(file.fileName)}`;
+    const profile = createFallbackProfile(file.fileName);
     const { data, error } = await supabase.storage.from(env.storageBucket).createSignedUploadUrl(storagePath, {
       upsert: false
     });
@@ -331,6 +303,29 @@ export async function createSignedUploadIntents(files: UploadIntentFile[]): Prom
     if (error) {
       throw new Error(error.message);
     }
+
+    const insert = await supabase.from("characters").insert({
+      id,
+      client_id: null,
+      file_name: file.fileName,
+      mime_type: file.mimeType || "application/octet-stream",
+      storage_path: storagePath,
+      status: "queued",
+      profile,
+      search_document: buildSearchDocument(profile, "", file.fileName),
+      error_message: null,
+      processing_attempts: 0,
+      processing_locked_at: null,
+      processing_locked_by: null,
+      next_process_at: new Date().toISOString(),
+      analysis_provider: "openai"
+    });
+
+    if (insert.error) {
+      throw new Error(insert.error.message);
+    }
+
+    await insertProcessingEvent(id, "upload_signed", "Upload row created and signed storage URL issued.");
 
     intents.push({
       ...file,
@@ -345,114 +340,238 @@ export async function createSignedUploadIntents(files: UploadIntentFile[]): Prom
   return intents;
 }
 
-export async function processStoredUploads(input: { uploads: StoredUpload[] }) {
+export async function completeStoredUploads(input: {
+  uploads: StoredUpload[];
+  failed?: FailedStoredUpload[];
+}) {
   const supabase = getSupabaseAdmin();
 
   if (!supabase) {
     throw new Error(deploymentConfigError(missingSupabaseEnv()));
   }
 
-  if (!input.uploads.length) {
+  const uploadIds = input.uploads.map((upload) => upload.id).filter(Boolean);
+  const failedUploads = input.failed || [];
+
+  if (uploadIds.length) {
+    const { error } = await supabase
+      .from("characters")
+      .update({
+        status: "processing",
+        error_message: null,
+        processing_locked_at: null,
+        processing_locked_by: null,
+        next_process_at: new Date().toISOString(),
+        analysis_provider: "openai"
+      })
+      .in("id", uploadIds);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    await Promise.all(uploadIds.map((id) => insertProcessingEvent(id, "upload_stored", "Image uploaded directly to private storage.")));
+  }
+
+  for (const failed of failedUploads) {
+    await supabase
+      .from("characters")
+      .update({
+        status: "failed",
+        error_message: failed.error || "Direct storage upload failed.",
+        processing_locked_at: null,
+        processing_locked_by: null
+      })
+      .eq("id", failed.id);
+    await insertProcessingEvent(failed.id, "upload_failed", failed.error || "Direct storage upload failed.");
+  }
+
+  if (!uploadIds.length && !failedUploads.length) {
     throw new Error("No uploaded files received.");
   }
 
-  const results: CharacterRecord[] = [];
+  const { data, error } = await supabase.from("characters").select(characterSelect).in("id", [...uploadIds, ...failedUploads.map((item) => item.id)]);
 
-  for (const upload of input.uploads) {
-    const mimeType = upload.mimeType || "application/octet-stream";
-    const download = await supabase.storage.from(env.storageBucket).download(upload.storagePath);
+  if (error) {
+    throw new Error(error.message);
+  }
 
-    if (download.error) {
-      throw new Error(download.error.message);
-    }
+  return Promise.all((data || []).map((row) => mapCharacterRow(row as CharacterRow)));
+}
 
-    const buffer = Buffer.from(await download.data.arrayBuffer());
+export async function processStoredUploads(input: { uploads: StoredUpload[] }) {
+  return completeStoredUploads({ uploads: input.uploads });
+}
 
-    await supabase.from("characters").insert({
-      id: upload.id,
-      client_id: null,
-      file_name: upload.fileName,
-      mime_type: mimeType,
-      storage_path: upload.storagePath,
-      status: "processing"
-    });
+export async function processPendingCharacters(input: { limit?: number; workerId?: string } = {}) {
+  const supabase = getSupabaseAdmin();
 
-    await supabase.from("processing_events").insert({
-      character_id: upload.id,
-      event_type: "upload_stored",
-      message: "Image uploaded directly to private storage."
-    });
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const workerId = input.workerId || `vercel-${crypto.randomUUID()}`;
+  const limit = Math.max(1, Math.min(input.limit || 2, 5));
+  const claimed = await claimProcessingCharacters(workerId, limit);
+  const results: Array<{ id: string; status: CharacterStatus; error?: string }> = [];
+
+  for (const row of claimed) {
+    await insertProcessingEvent(row.id, "analysis_started", `Processing attempt ${row.processing_attempts}.`);
 
     try {
-      const profile = await analyzeCharacterImage({ buffer, mimeType, fileName: upload.fileName });
-      const searchDocument = buildSearchDocument(profile, "", upload.fileName);
-      const embedding = await embedSearchText(searchDocument, "RETRIEVAL_DOCUMENT");
+      const download = await supabase.storage.from(env.storageBucket).download(row.storage_path);
 
-      const { data, error } = await supabase
+      if (download.error) {
+        throw new Error(download.error.message);
+      }
+
+      const buffer = Buffer.from(await download.data.arrayBuffer());
+      const profile = await analyzeCharacterImage({
+        buffer,
+        mimeType: row.mime_type || "application/octet-stream",
+        fileName: row.file_name
+      });
+      const searchDocument = buildSearchDocument(profile, "", row.file_name);
+      const embedding = await embedSearchText(searchDocument);
+
+      if (!embedding) {
+        throw new Error(deploymentConfigError(["OPENAI_API_KEY"]));
+      }
+
+      const { error } = await supabase
         .from("characters")
         .update({
           status: "ready",
           profile,
           search_document: searchDocument,
           embedding: toVectorLiteral(embedding),
-          error_message: null
+          error_message: null,
+          processing_locked_at: null,
+          processing_locked_by: null,
+          next_process_at: null,
+          analysis_provider: "openai"
         })
-        .eq("id", upload.id)
-        .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
-        .single();
+        .eq("id", row.id);
 
       if (error) {
         throw new Error(error.message);
       }
 
-      await supabase.from("processing_events").insert({
-        character_id: upload.id,
-        event_type: "analysis_ready",
-        message: "AI profile and embedding generated."
-      });
-
-      results.push(await mapCharacterRow(data as CharacterRow));
+      await insertProcessingEvent(row.id, "analysis_ready", "OpenAI profile and embedding generated.");
+      results.push({ id: row.id, status: "ready" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown processing error.";
+      const shouldRetry = isRetryableAIError(error) && row.processing_attempts < maxProcessingAttempts;
 
-      await supabase.from("characters").update({ status: "failed", error_message: message }).eq("id", upload.id);
-      await supabase.from("processing_events").insert({
-        character_id: upload.id,
-        event_type: "analysis_failed",
-        message
-      });
+      if (shouldRetry) {
+        const nextProcessAt = new Date(Date.now() + retryDelayMs(row.processing_attempts)).toISOString();
 
-      results.push({
-        id: upload.id,
-        client_id: null,
-        client_name: "Unassigned",
-        file_name: upload.fileName,
-        mime_type: mimeType,
-        storage_path: upload.storagePath,
-        image_url: await signedImageUrl(upload.storagePath),
-        status: "failed",
-        profile: {
-          summary: "Processing failed.",
-          apparent_age_range: "unknown",
-          gender_presentation: "unknown",
-          wardrobe: [],
-          dominant_colors: [],
-          expression: "unknown",
-          pose: "unknown",
-          shot_type: "unknown",
-          background: "unknown",
-          style: "unknown",
-          quality_notes: message,
-          searchable_phrases: []
-        },
-        search_document: "",
-        error_message: message,
-        created_at: new Date().toISOString()
-      });
+        await supabase
+          .from("characters")
+          .update({
+            status: "processing",
+            error_message: message,
+            processing_locked_at: null,
+            processing_locked_by: null,
+            next_process_at: nextProcessAt,
+            analysis_provider: "openai"
+          })
+          .eq("id", row.id);
+        await insertProcessingEvent(row.id, "analysis_retry", message);
+        results.push({ id: row.id, status: "processing", error: message });
+      } else {
+        await supabase
+          .from("characters")
+          .update({
+            status: "failed",
+            error_message: message,
+            processing_locked_at: null,
+            processing_locked_by: null,
+            next_process_at: null,
+            analysis_provider: "openai"
+          })
+          .eq("id", row.id);
+        await insertProcessingEvent(row.id, "analysis_failed", message);
+        results.push({ id: row.id, status: "failed", error: message });
+      }
     }
   }
 
-  return results;
+  return {
+    claimed: claimed.length,
+    processed: results.filter((item) => item.status === "ready").length,
+    retrying: results.filter((item) => item.status === "processing").length,
+    failed: results.filter((item) => item.status === "failed").length,
+    results
+  };
+}
+
+export async function recoverStorageOnlyUploads(input: { limit?: number } = {}) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const limit = Math.max(1, Math.min(input.limit || 100, 500));
+  const { data: objects, error } = await supabase.storage.from(env.storageBucket).list("unassigned", {
+    limit,
+    sortBy: { column: "created_at", order: "desc" }
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const paths = (objects || []).filter((object) => object.name && object.name !== ".emptyFolderPlaceholder").map((object) => `unassigned/${object.name}`);
+
+  if (!paths.length) {
+    return { recovered: 0 };
+  }
+
+  const { data: existing, error: existingError } = await supabase.from("characters").select("storage_path").in("storage_path", paths);
+
+  if (existingError) {
+    throw new Error(existingError.message);
+  }
+
+  const existingPaths = new Set((existing || []).map((row) => row.storage_path));
+  const missingPaths = paths.filter((path) => !existingPaths.has(path));
+  const rows = missingPaths.map((storagePath) => {
+    const fileName = storagePath.split("/").pop() || "recovered-upload";
+    const id = parseUuidFromStoredName(fileName) || crypto.randomUUID();
+    const displayName = fileName.replace(/^[0-9a-f-]{36}-/i, "");
+    const profile = createFallbackProfile(displayName);
+
+    return {
+      id,
+      client_id: null,
+      file_name: displayName,
+      mime_type: mimeTypeFromFileName(displayName),
+      storage_path: storagePath,
+      status: "processing" as CharacterStatus,
+      profile,
+      search_document: buildSearchDocument(profile, "", displayName),
+      error_message: null,
+      processing_attempts: 0,
+      processing_locked_at: null,
+      processing_locked_by: null,
+      next_process_at: new Date().toISOString(),
+      analysis_provider: "openai"
+    };
+  });
+
+  if (rows.length) {
+    const { error: insertError } = await supabase.from("characters").insert(rows);
+
+    if (insertError) {
+      throw new Error(insertError.message);
+    }
+
+    await Promise.all(rows.map((row) => insertProcessingEvent(row.id, "recovered_from_storage", "Storage object recovered into processing queue.")));
+  }
+
+  return { recovered: rows.length };
 }
 
 export async function getCharacterDownload(id: string) {
@@ -472,7 +591,6 @@ export async function getCharacterDownload(id: string) {
     .from("characters")
     .select("file_name,mime_type,storage_path")
     .eq("id", cleanId)
-    .eq("status", "ready")
     .single();
 
   if (characterError || !character) {
@@ -507,11 +625,7 @@ export async function deleteCharacter(id: string) {
     return { id: cleanId, storageDeleted: false };
   }
 
-  const { data: character, error: characterError } = await supabase
-    .from("characters")
-    .select("id,storage_path")
-    .eq("id", cleanId)
-    .single();
+  const { data: character, error: characterError } = await supabase.from("characters").select("id,storage_path").eq("id", cleanId).single();
 
   if (characterError || !character) {
     throw new Error(characterError?.message || "Reference not found.");
@@ -539,6 +653,53 @@ export async function deleteCharacter(id: string) {
   };
 }
 
+async function claimProcessingCharacters(workerId: string, limit: number): Promise<ProcessingClaimRow[]> {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return [];
+  }
+
+  const rpc = await supabase.rpc("claim_processing_characters", {
+    worker_id: workerId,
+    batch_count: limit
+  });
+
+  if (!rpc.error && Array.isArray(rpc.data)) {
+    return rpc.data as ProcessingClaimRow[];
+  }
+
+  const lockExpiredAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("characters")
+    .select("id,file_name,mime_type,storage_path,processing_attempts")
+    .eq("status", "processing")
+    .lte("next_process_at", new Date().toISOString())
+    .or(`processing_locked_at.is.null,processing_locked_at.lt.${lockExpiredAt}`)
+    .order("created_at", { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(rpc.error?.message || error.message);
+  }
+
+  const rows = (data || []) as ProcessingClaimRow[];
+
+  for (const row of rows) {
+    await supabase
+      .from("characters")
+      .update({
+        processing_locked_at: new Date().toISOString(),
+        processing_locked_by: workerId,
+        processing_attempts: (row.processing_attempts || 0) + 1
+      })
+      .eq("id", row.id);
+    row.processing_attempts = (row.processing_attempts || 0) + 1;
+  }
+
+  return rows;
+}
+
 async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
   const clientRelation = Array.isArray(row.clients) ? row.clients[0] : row.clients;
 
@@ -555,6 +716,10 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
     search_document: row.search_document,
     similarity: row.similarity,
     error_message: row.error_message,
+    processing_attempts: row.processing_attempts || 0,
+    processing_locked_at: row.processing_locked_at,
+    next_process_at: row.next_process_at,
+    analysis_provider: row.analysis_provider,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -568,6 +733,10 @@ function filterLibraryCharacters(
   }
 ) {
   return characters.filter((character) => {
+    if (character.status !== "ready") {
+      return (filters.gender || "all") === "all" && (filters.age || "all") === "all";
+    }
+
     const profile = normalizeProfile(character.profile);
 
     return genderMatches(profile, filters.gender) && ageMatches(profile, filters.age);
@@ -673,6 +842,24 @@ async function signedImageUrl(storagePath: string) {
   return data.signedUrl;
 }
 
+async function insertProcessingEvent(characterId: string, eventType: string, message: string) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return;
+  }
+
+  await supabase.from("processing_events").insert({
+    character_id: characterId,
+    event_type: eventType,
+    message
+  });
+}
+
+function retryDelayMs(attempt: number) {
+  return Math.min(60_000 * 2 ** Math.max(0, attempt - 1), 30 * 60_000);
+}
+
 function slugify(value: string) {
   return value
     .toLowerCase()
@@ -683,4 +870,31 @@ function slugify(value: string) {
 
 function safeFileName(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
+}
+
+function parseUuidFromStoredName(value: string) {
+  const match = value.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-/i);
+  return match?.[1] || null;
+}
+
+function mimeTypeFromFileName(fileName: string) {
+  const extension = fileName.split(".").pop()?.toLowerCase();
+
+  if (extension === "jpg" || extension === "jpeg") {
+    return "image/jpeg";
+  }
+
+  if (extension === "png") {
+    return "image/png";
+  }
+
+  if (extension === "webp") {
+    return "image/webp";
+  }
+
+  if (extension === "gif") {
+    return "image/gif";
+  }
+
+  return "application/octet-stream";
 }

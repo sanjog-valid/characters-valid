@@ -9,7 +9,9 @@ Internal character library for Valid.co editors. The app stores realistic AI cha
 - Uploads support fast batch image selection without requiring client assignment.
 - Browser uploads go directly to Supabase Storage through signed upload URLs, avoiding Vercel function body limits.
 - Client assignment is paused in the editor flow; the centrally maintained client list remains available for a later workflow.
-- AI-generated metadata and Gemini embeddings are created server-side.
+- AI-generated metadata and OpenAI embeddings are created server-side.
+- Upload rows are persisted before storage upload, so queued/processing records survive refreshes.
+- A Vercel cron processor analyzes small batches in the background.
 - Supabase stores images, metadata, processing events, and pgvector embeddings.
 - The UI uses official shadcn/ui components generated into `components/ui`.
 
@@ -20,16 +22,21 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Copy `.env.example` to `.env.local` and fill the Supabase/Gemini values.
+Copy `.env.example` to `.env.local` and fill the Supabase/OpenAI values.
 
 ## Environment
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_STORAGE_BUCKET`
-- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_VISION_MODEL`
+- `OPENAI_EMBEDDING_MODEL`
+- `OPENAI_EMBEDDING_DIMENSIONS`
+- `PROCESSOR_SECRET`
+- `CRON_SECRET`
 
-The same Gemini API key is used for image analysis and embeddings.
+The OpenAI key is used for image analysis and embeddings. Rotate any key pasted into chat before using it in production.
 
 ## Vercel
 
@@ -39,16 +46,18 @@ Connect the GitHub repo to Vercel as a standard Next.js project.
 - Build command: `npm run build`
 - Output directory: `.next`
 
-The repo config already supplies non-secret production values: app name, Supabase URL, storage bucket, and Gemini model names.
+The repo config already supplies non-secret production values: app name, Supabase URL, storage bucket, and OpenAI model names.
 
 Add only these secret values in Vercel Project Settings:
 
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `PROCESSOR_SECRET`
+- `CRON_SECRET` set to the same value as `PROCESSOR_SECRET` so Vercel cron can authenticate.
 
 Do not add `.env.local` to GitHub. Use `/api/health` on the deployed app to verify production runtime config; it returns missing variable names without exposing secret values.
 
-The upload flow is Vercel-safe: `/api/upload/sign` creates short-lived Supabase signed upload URLs, the browser sends image bytes directly to Supabase Storage, and `/api/upload` receives only small JSON metadata to run Gemini analysis and create embeddings.
+The upload flow is Vercel-safe: `/api/upload/sign` creates a queued character row and a short-lived Supabase signed upload URL, the browser sends image bytes directly to Supabase Storage, `/api/upload/complete` marks rows as processing, and `/api/process-pending` runs OpenAI analysis in background batches.
 
 ## Supabase
 

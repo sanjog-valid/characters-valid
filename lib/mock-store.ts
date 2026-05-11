@@ -1,4 +1,4 @@
-import { buildSearchDocument, createFallbackProfile } from "@/lib/gemini";
+import { buildSearchDocument, createFallbackProfile } from "@/lib/openai";
 import { APPROVED_CLIENT_NAMES } from "@/lib/client-list";
 import type { CharacterRecord, CharacterStatus, ClientRecord } from "@/lib/types";
 

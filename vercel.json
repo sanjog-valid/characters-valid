@@ -8,8 +8,14 @@
     "NEXT_PUBLIC_APP_NAME": "Valid Character Library",
     "SUPABASE_URL": "https://itfhtxwhlnssqyfeoskw.supabase.co",
     "SUPABASE_STORAGE_BUCKET": "characters",
-    "GEMINI_VISION_MODEL": "gemini-2.5-flash",
-    "GEMINI_EMBEDDING_MODEL": "gemini-embedding-001",
-    "GEMINI_EMBEDDING_DIMENSIONS": "768"
-  }
+    "OPENAI_VISION_MODEL": "gpt-5-mini",
+    "OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
+    "OPENAI_EMBEDDING_DIMENSIONS": "768"
+  },
+  "crons": [
+    {
+      "path": "/api/process-pending",
+      "schedule": "* * * * *"
+    }
+  ]
 }

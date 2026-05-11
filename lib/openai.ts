@@ -1,24 +1,24 @@
-import { deploymentConfigError, env, isGeminiConfigured } from "@/lib/env";
+import { deploymentConfigError, env, isOpenAIConfigured } from "@/lib/env";
 import type { CharacterProfile } from "@/lib/types";
 
-type GeminiPart = {
-  text?: string;
-  inlineData?: {
-    mimeType: string;
-    data: string;
-  };
-};
-
-type GeminiFetchOptions = {
+type OpenAIFetchOptions = {
   label: string;
   url: string;
   body: unknown;
 };
 
+export class RetryableAIError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableAIError";
+  }
+}
+
 const retryableStatuses = new Set([429, 500, 502, 503, 504]);
 
 const profileSchema = {
   type: "object",
+  additionalProperties: false,
   properties: {
     summary: { type: "string" },
     apparent_age_range: { type: "string" },
@@ -54,8 +54,8 @@ export function createFallbackProfile(fileName: string): CharacterProfile {
 
   return {
     summary: normalized
-      ? `Character reference image from ${normalized}. Add Gemini to generate precise visual analysis.`
-      : "Character reference image awaiting Gemini visual analysis.",
+      ? `Character reference image from ${normalized}. Awaiting OpenAI visual analysis.`
+      : "Character reference image awaiting OpenAI visual analysis.",
     apparent_age_range: "unknown",
     gender_presentation: "unknown",
     wardrobe: ["unprocessed"],
@@ -65,7 +65,7 @@ export function createFallbackProfile(fileName: string): CharacterProfile {
     shot_type: "unknown",
     background: "unknown",
     style: "realistic AI character reference",
-    quality_notes: "Gemini API key is not configured, so this record is using fallback metadata.",
+    quality_notes: "OpenAI analysis has not completed yet.",
     searchable_phrases: [normalized, "character reference", "ai video ad character"].filter(Boolean)
   };
 }
@@ -98,68 +98,73 @@ export async function analyzeCharacterImage(input: {
   mimeType: string;
   fileName: string;
 }) {
-  if (!isGeminiConfigured()) {
-    throw new Error(deploymentConfigError(["GEMINI_API_KEY"]));
+  if (!isOpenAIConfigured()) {
+    throw new Error(deploymentConfigError(["OPENAI_API_KEY"]));
   }
 
-  const parts: GeminiPart[] = [
-    {
-      text:
-        "Analyze this AI video ad character base image for an internal reusable character library. " +
-        "Do not identify the person. Do not infer a real identity. Describe only visible production-relevant traits. " +
-        "Return concise JSON for semantic search. Avoid manual tagging language. " +
-        "Use 'unknown' when a trait is not visible. Describe cultural clothing only when visible; do not guess ethnicity."
-    },
-    {
-      inlineData: {
-        mimeType: input.mimeType,
-        data: input.buffer.toString("base64")
-      }
-    }
-  ];
-
-  const payload = await fetchGeminiJson({
-    label: "Gemini image analysis",
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiVisionModel}:generateContent?key=${env.geminiApiKey}`,
+  const payload = await fetchOpenAIJson({
+    label: "OpenAI image analysis",
+    url: "https://api.openai.com/v1/responses",
     body: {
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-        responseSchema: profileSchema
+      model: env.openaiVisionModel,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text:
+                "Analyze this AI video ad character base image for an internal reusable character library. " +
+                "Do not identify the person. Do not infer a real identity. Describe only visible production-relevant traits. " +
+                "Return concise JSON for semantic search. Use 'unknown' when a trait is not visible. " +
+                "Describe cultural clothing only when visible; do not guess ethnicity."
+            },
+            {
+              type: "input_image",
+              image_url: `data:${input.mimeType};base64,${input.buffer.toString("base64")}`,
+              detail: "low"
+            }
+          ]
+        }
+      ],
+      max_output_tokens: 1200,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "character_profile",
+          strict: true,
+          schema: profileSchema
+        }
       }
     }
   });
-  const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = extractResponseText(payload);
 
   if (!text) {
-    throw new Error("Gemini image analysis returned no text response.");
+    throw new Error("OpenAI image analysis returned no text response.");
   }
 
   return normalizeProfile(JSON.parse(text));
 }
 
-export async function embedSearchText(text: string, taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY") {
-  if (!isGeminiConfigured()) {
+export async function embedSearchText(text: string) {
+  if (!isOpenAIConfigured()) {
     return null;
   }
 
-  const payload = await fetchGeminiJson({
-    label: "Gemini embedding",
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiEmbeddingModel}:embedContent?key=${env.geminiApiKey}`,
+  const payload = await fetchOpenAIJson({
+    label: "OpenAI embedding",
+    url: "https://api.openai.com/v1/embeddings",
     body: {
-      model: `models/${env.geminiEmbeddingModel}`,
-      content: {
-        parts: [{ text }]
-      },
-      taskType,
-      outputDimensionality: env.geminiEmbeddingDimensions
+      model: env.openaiEmbeddingModel,
+      input: text,
+      dimensions: env.openaiEmbeddingDimensions
     }
   });
-  const values = payload?.embedding?.values;
+  const values = payload?.data?.[0]?.embedding;
 
   if (!Array.isArray(values)) {
-    throw new Error("Gemini embedding response did not include embedding values.");
+    throw new Error("OpenAI embedding response did not include embedding values.");
   }
 
   return values as number[];
@@ -192,6 +197,15 @@ export function normalizeProfile(value: Partial<CharacterProfile> | null | undef
   };
 }
 
+export function isRetryableAIError(error: unknown) {
+  if (error instanceof RetryableAIError) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /fetch failed|429|500|502|503|504|rate limit|temporarily unavailable|timeout/i.test(message);
+}
+
 function normalizeList(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -200,7 +214,7 @@ function normalizeList(value: unknown) {
   return value.map((item) => String(item).trim()).filter(Boolean).slice(0, 12);
 }
 
-async function fetchGeminiJson(options: GeminiFetchOptions) {
+async function fetchOpenAIJson(options: OpenAIFetchOptions) {
   const maxAttempts = 4;
   let lastMessage = "";
 
@@ -209,6 +223,7 @@ async function fetchGeminiJson(options: GeminiFetchOptions) {
       const response = await fetch(options.url, {
         method: "POST",
         headers: {
+          Authorization: `Bearer ${env.openaiApiKey}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify(options.body)
@@ -226,12 +241,16 @@ async function fetchGeminiJson(options: GeminiFetchOptions) {
       }
     } catch (error) {
       if (error instanceof Error && error.message.startsWith(`${options.label} failed:`)) {
+        if (isRetryableAIError(error)) {
+          throw new RetryableAIError(error.message);
+        }
+
         throw error;
       }
 
       lastMessage = error instanceof Error ? error.message : "fetch failed";
 
-      if (attempt === maxAttempts || !isRetryableGeminiError(lastMessage)) {
+      if (attempt === maxAttempts || !isRetryableAIError(lastMessage)) {
         throw new Error(`${options.label} failed: ${lastMessage}`);
       }
     }
@@ -239,11 +258,28 @@ async function fetchGeminiJson(options: GeminiFetchOptions) {
     await sleep(900 * attempt * attempt);
   }
 
-  throw new Error(`${options.label} failed: ${lastMessage || "unknown error"}`);
+  throw new RetryableAIError(`${options.label} failed: ${lastMessage || "unknown error"}`);
 }
 
-function isRetryableGeminiError(message: string) {
-  return /fetch failed|429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED/i.test(message);
+function extractResponseText(payload: any) {
+  if (typeof payload?.output_text === "string") {
+    return payload.output_text;
+  }
+
+  const chunks: string[] = [];
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+
+    for (const part of content) {
+      if (typeof part?.text === "string") {
+        chunks.push(part.text);
+      }
+    }
+  }
+
+  return chunks.join("").trim();
 }
 
 function sleep(ms: number) {

@@ -35,6 +35,10 @@ export type CharacterRecord = {
   search_document: string;
   similarity?: number;
   error_message?: string | null;
+  processing_attempts?: number;
+  processing_locked_at?: string | null;
+  next_process_at?: string | null;
+  analysis_provider?: string | null;
   created_at: string;
   updated_at?: string;
 };
@@ -73,4 +77,9 @@ export type StoredUpload = {
   storagePath: string;
   fileName: string;
   mimeType: string;
+};
+
+export type FailedStoredUpload = {
+  id: string;
+  error: string;
 };

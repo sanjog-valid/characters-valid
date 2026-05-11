@@ -30,7 +30,7 @@ type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "queued" | "uploading" | "processing" | "done" | "failed";
+  status: "queued" | "signing" | "uploading" | "uploaded" | "processing" | "done" | "failed";
 };
 
 type ViewMode = "library" | "upload";
@@ -52,8 +52,6 @@ const ageOptions: Array<{ label: string; value: AgeFilter }> = [
   { label: "50-59", value: "50-59" },
   { label: "60+", value: "60-plus" }
 ];
-const processChunkSize = 2;
-
 export default function Home() {
   const [characters, setCharacters] = useState<CharacterRecord[]>([]);
   const [selected, setSelected] = useState<CharacterRecord | null>(null);
@@ -112,6 +110,18 @@ export default function Home() {
 
     return () => window.clearTimeout(handle);
   }, [runSearch]);
+
+  useEffect(() => {
+    if (!characters.some((character) => character.status === "queued" || character.status === "processing")) {
+      return;
+    }
+
+    const handle = window.setInterval(() => {
+      runSearch();
+    }, 8000);
+
+    return () => window.clearInterval(handle);
+  }, [characters, runSearch]);
 
   const handleCharacterDeleted = useCallback(
     (deletedId: string) => {
@@ -269,10 +279,11 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
-  const uploadableItems = items.filter((item) => item.status !== "done");
+  const uploadableItems = items.filter((item) => item.status === "queued" || item.status === "failed");
   const completedItems = items.filter((item) => item.status === "done");
+  const processingItems = items.filter((item) => item.status === "processing");
   const uploadSummary = items.length
-    ? `${uploadableItems.length} pending${completedItems.length ? `, ${completedItems.length} complete` : ""}`
+    ? `${uploadableItems.length} pending${processingItems.length ? `, ${processingItems.length} processing` : ""}${completedItems.length ? `, ${completedItems.length} complete` : ""}`
     : "Drop images here when they are ready for analysis.";
 
   const addFiles = useCallback((files: FileList | File[]) => {
@@ -345,7 +356,7 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
     const uploadableIds = new Set(uploadableItems.map((item) => item.id));
     setUploading(true);
     setError("");
-    setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "uploading" } : item)));
+    setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "signing" } : item)));
 
     try {
       const signResponse = await fetch("/api/upload/sign", {
@@ -370,84 +381,92 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
 
       const intents = (signPayload.uploads || []) as SignedUploadIntent[];
       const uploadedIntents: SignedUploadIntent[] = [];
+      const failedUploads: Array<{ id: string; error: string }> = [];
 
-      for (const intent of intents) {
+      await runWithConcurrency(intents, 4, async (intent) => {
         const item = uploadableItems.find((candidate) => candidate.id === intent.clientUploadId);
 
         if (!item) {
-          continue;
+          return;
         }
 
         try {
+          setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "uploading" } : currentItem)));
           await uploadFileToSignedUrl(intent.signedUrl, item.file);
           uploadedIntents.push(intent);
-          setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "processing" } : currentItem)));
+          setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "uploaded" } : currentItem)));
         } catch (directUploadError) {
+          const message = directUploadError instanceof Error ? directUploadError.message : "Upload failed.";
+          failedUploads.push({ id: intent.id, error: message });
           setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "failed" } : currentItem)));
-          setError(directUploadError instanceof Error ? `${item.file.name}: ${directUploadError.message}` : `${item.file.name}: Upload failed.`);
+          setError(`${item.file.name}: ${message}`);
         }
-      }
+      });
 
-      if (!uploadedIntents.length) {
+      if (!uploadedIntents.length && !failedUploads.length) {
         throw new Error("Upload failed.");
       }
 
-      const processingErrors: string[] = [];
+      const completeResponse = await fetch("/api/upload/complete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          uploads: uploadedIntents.map((intent) => ({
+            clientUploadId: intent.clientUploadId,
+            id: intent.id,
+            storagePath: intent.storagePath,
+            fileName: intent.fileName,
+            mimeType: intent.mimeType
+          })),
+          failed: failedUploads
+        })
+      });
+      const completePayload = await readJsonResponse<{ characters?: CharacterRecord[]; error?: string }>(completeResponse);
 
-      for (const chunk of chunkArray(uploadedIntents, processChunkSize)) {
-        const chunkIds = new Set(chunk.map((intent) => intent.clientUploadId));
-        const pathByClientUploadId = new Map(chunk.map((intent) => [intent.clientUploadId, intent.storagePath]));
+      if (!completeResponse.ok) {
+        throw new Error(completePayload.error || "Could not finalize uploads.");
+      }
 
-        try {
-          const processResponse = await fetch("/api/upload", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              uploads: chunk.map((intent) => ({
-                clientUploadId: intent.clientUploadId,
-                id: intent.id,
-                storagePath: intent.storagePath,
-                fileName: intent.fileName,
-                mimeType: intent.mimeType
-              }))
-            })
-          });
-          const processPayload = await readJsonResponse<{ characters?: CharacterRecord[]; error?: string }>(processResponse);
+      const uploadedIds = new Set(uploadedIntents.map((intent) => intent.clientUploadId));
 
-          if (!processResponse.ok) {
-            throw new Error(processPayload.error || "Processing failed.");
+      setItems((current) =>
+        current.map((item) => {
+          if (uploadedIds.has(item.id)) {
+            return { ...item, status: "processing" };
           }
 
-          const processedCharacters = processPayload.characters || [];
-          const failedPaths = new Set(processedCharacters.filter((character) => character.status === "failed").map((character) => character.storage_path));
+          return item;
+        })
+      );
 
-          setItems((current) =>
-            current.map((item) => {
-              const storagePath = pathByClientUploadId.get(item.id);
-
-              if (!storagePath) {
-                return item;
-              }
-
-              return { ...item, status: failedPaths.has(storagePath) ? "failed" : "done" };
-            })
-          );
-        } catch (processingError) {
-          processingErrors.push(processingError instanceof Error ? processingError.message : "Processing failed.");
-          setItems((current) => current.map((item) => (chunkIds.has(item.id) ? { ...item, status: "failed" } : item)));
-        }
+      if (failedUploads.length) {
+        setError(`${failedUploads.length} image${failedUploads.length === 1 ? "" : "s"} failed to upload. The rest are processing.`);
+      } else {
+        setError("");
       }
 
-      if (processingErrors.length) {
-        setError(`Some images failed during analysis: ${processingErrors[0]}`);
-      }
+      fetch("/api/process-pending", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ limit: 2 })
+      }).catch(() => {
+        // Cron will pick up processing rows if manual kick-off is not allowed.
+      });
 
       await onUploaded();
     } catch (uploadError) {
       setItems((current) =>
-        current.map((item) => (uploadableIds.has(item.id) && item.status !== "done" ? { ...item, status: "failed" } : item))
+        current.map((item) => {
+          if (!uploadableIds.has(item.id) || item.status === "processing" || item.status === "done") {
+            return item;
+          }
+
+          return { ...item, status: "failed" };
+        })
       );
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed.");
     } finally {
@@ -633,6 +652,7 @@ function CharacterGrid({
     <div className="grid grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-3 max-sm:grid-cols-1">
       {characters.map((character) => {
         const profile = safeProfile(character.profile);
+        const isReady = character.status === "ready";
 
         return (
           <Button
@@ -647,6 +667,14 @@ function CharacterGrid({
           >
             <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
               <img className="size-full object-cover" src={character.image_url} alt={profile.summary || character.file_name} />
+              {!isReady ? (
+                <div className="absolute inset-0 grid place-items-center bg-background/70 backdrop-blur-[2px]">
+                  <Badge variant="outline" className={cn("gap-1.5", statusTone(character.status))}>
+                    {character.status === "processing" ? <Loader2 className="spin size-3" /> : null}
+                    {libraryStatusLabel(character)}
+                  </Badge>
+                </div>
+              ) : null}
             </div>
             <div className="grid gap-2 p-2.5">
               <div className="grid gap-0.5">
@@ -780,6 +808,12 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
       </div>
 
       <CardHeader>
+        {character.status !== "ready" ? (
+          <Badge variant="outline" className={cn("mb-2 w-fit gap-1.5", statusTone(character.status))}>
+            {character.status === "processing" ? <Loader2 className="spin size-3" /> : null}
+            {libraryStatusLabel(character)}
+          </Badge>
+        ) : null}
         <CardTitle className="text-[17px] leading-snug">{profile.summary}</CardTitle>
         <CardDescription className="break-words">{character.file_name}</CardDescription>
       </CardHeader>
@@ -854,7 +888,7 @@ function Attribute({ label, value }: { label: string; value: string }) {
 function StatusPill({ status }: { status: UploadItem["status"] }) {
   return (
     <Badge variant="outline" className={cn("justify-center capitalize", statusTone(status))}>
-      {status}
+      {status === "uploaded" ? "Uploaded" : status}
     </Badge>
   );
 }
@@ -885,8 +919,8 @@ function safeProfile(profile: Partial<CharacterProfile> | null | undefined): Cha
   };
 }
 
-function statusTone(status: UploadItem["status"]) {
-  if (status === "done") {
+function statusTone(status: UploadItem["status"] | CharacterRecord["status"]) {
+  if (status === "done" || status === "ready") {
     return "border-success/20 bg-success/10 text-success";
   }
 
@@ -906,11 +940,7 @@ function progressTone(status: UploadItem["status"]) {
     return "bg-destructive";
   }
 
-  if (status === "uploading") {
-    return "bg-info";
-  }
-
-  if (status === "processing") {
+  if (status === "uploading" || status === "uploaded" || status === "processing") {
     return "bg-info";
   }
 
@@ -930,7 +960,35 @@ function progressWidth(status: UploadItem["status"]) {
     return "82%";
   }
 
+  if (status === "uploaded") {
+    return "72%";
+  }
+
+  if (status === "signing") {
+    return "36%";
+  }
+
   return "20%";
+}
+
+function libraryStatusLabel(character: CharacterRecord) {
+  if (character.status === "queued") {
+    return "Queued";
+  }
+
+  if (character.status === "processing" && character.error_message) {
+    return "Retrying";
+  }
+
+  if (character.status === "processing") {
+    return "Processing";
+  }
+
+  if (character.status === "failed") {
+    return "Failed";
+  }
+
+  return "Ready";
 }
 
 function hasDraggedFiles(dataTransfer: DataTransfer) {
@@ -1012,12 +1070,17 @@ function cleanServerText(value: string) {
     .slice(0, 220);
 }
 
-function chunkArray<T>(items: T[], size: number) {
-  const chunks: T[][] = [];
+async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
+  const executing = new Set<Promise<void>>();
 
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
+  for (const item of items) {
+    const promise = worker(item).finally(() => executing.delete(promise));
+    executing.add(promise);
+
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
   }
 
-  return chunks;
+  await Promise.all(executing);
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { processStoredUploads, uploadAndProcessCharacters } from "@/lib/character-service";
+import { completeStoredUploads, uploadAndProcessCharacters } from "@/lib/character-service";
 import type { StoredUpload, UploadAssignment } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -17,7 +17,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "No uploaded files received." }, { status: 400 });
       }
 
-      const characters = await processStoredUploads({
+      const characters = await completeStoredUploads({
         uploads: uploads.map((upload) => ({
           clientUploadId: String(upload.clientUploadId || ""),
           id: String(upload.id || ""),

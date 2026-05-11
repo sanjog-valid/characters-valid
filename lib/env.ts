@@ -9,7 +9,13 @@ export const env = {
   geminiApiKey: process.env.GEMINI_API_KEY || "",
   geminiVisionModel: process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash",
   geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001",
-  geminiEmbeddingDimensions: Number(process.env.GEMINI_EMBEDDING_DIMENSIONS || 768)
+  geminiEmbeddingDimensions: Number(process.env.GEMINI_EMBEDDING_DIMENSIONS || 768),
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  openaiVisionModel: process.env.OPENAI_VISION_MODEL || "gpt-5-mini",
+  openaiEmbeddingModel: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
+  openaiEmbeddingDimensions: Number(process.env.OPENAI_EMBEDDING_DIMENSIONS || 768),
+  processorSecret: process.env.PROCESSOR_SECRET || "",
+  cronSecret: process.env.CRON_SECRET || ""
 };
 
 export function isSupabaseConfigured() {
@@ -18,6 +24,10 @@ export function isSupabaseConfigured() {
 
 export function isGeminiConfigured() {
   return Boolean(env.geminiApiKey);
+}
+
+export function isOpenAIConfigured() {
+  return Boolean(env.openaiApiKey);
 }
 
 export function getRuntimeEnvStatus() {
@@ -31,8 +41,8 @@ export function getRuntimeEnvStatus() {
     missing.push("SUPABASE_SERVICE_ROLE_KEY");
   }
 
-  if (!env.geminiApiKey) {
-    missing.push("GEMINI_API_KEY");
+  if (!env.openaiApiKey) {
+    missing.push("OPENAI_API_KEY");
   }
 
   return {
@@ -44,10 +54,16 @@ export function getRuntimeEnvStatus() {
       storageBucket: Boolean(env.storageBucket),
       geminiApiKey: Boolean(env.geminiApiKey),
       geminiVisionModel: Boolean(env.geminiVisionModel),
-      geminiEmbeddingModel: Boolean(env.geminiEmbeddingModel)
+      geminiEmbeddingModel: Boolean(env.geminiEmbeddingModel),
+      openaiApiKey: Boolean(env.openaiApiKey),
+      openaiVisionModel: Boolean(env.openaiVisionModel),
+      openaiEmbeddingModel: Boolean(env.openaiEmbeddingModel),
+      processorSecret: Boolean(env.processorSecret),
+      cronSecret: Boolean(env.cronSecret)
     },
     supabaseConfigured: isSupabaseConfigured(),
-    geminiConfigured: isGeminiConfigured()
+    geminiConfigured: isGeminiConfigured(),
+    openaiConfigured: isOpenAIConfigured()
   };
 }
 
