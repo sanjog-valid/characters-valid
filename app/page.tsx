@@ -22,7 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import type { CharacterRecord, CharacterStatus, SignedUploadIntent } from "@/lib/types";
+import type { CharacterProfile, CharacterRecord, CharacterStatus, SignedUploadIntent } from "@/lib/types";
 
 type UploadItem = {
   id: string;
@@ -66,13 +66,15 @@ export default function Home() {
         throw new Error(payload.error || "Search failed.");
       }
 
-      setCharacters(payload.characters);
+      const characters = Array.isArray(payload.characters) ? (payload.characters as CharacterRecord[]) : [];
+
+      setCharacters(characters);
       setSelected((current) => {
         if (!current) {
-          return payload.characters[0] || null;
+          return characters[0] || null;
         }
 
-        return payload.characters.find((character: CharacterRecord) => character.id === current.id) || payload.characters[0] || null;
+        return characters.find((character) => character.id === current.id) || characters[0] || null;
       });
     } catch (searchError) {
       setError(searchError instanceof Error ? searchError.message : "Search failed.");
@@ -571,46 +573,50 @@ function CharacterGrid({
 
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-3 max-sm:grid-cols-1">
-      {characters.map((character) => (
-        <Button
-          variant="ghost"
-          className={cn(
-            "h-auto flex-col items-stretch justify-start gap-0 overflow-hidden rounded-lg border bg-card p-0 text-left shadow-xs transition-colors hover:bg-muted",
-            selectedId === character.id && "border-primary ring-2 ring-primary/20"
-          )}
-          key={character.id}
-          type="button"
-          onClick={() => onSelect(character)}
-        >
-          <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
-            <img className="size-full object-cover" src={character.image_url} alt={character.profile.summary || character.file_name} />
-            <StatusBadge status={character.status} />
-            <div className="absolute inset-x-2 bottom-2 flex min-h-7 items-center justify-between gap-2 rounded-md border bg-card/90 px-2 py-1 text-xs font-semibold">
-              <span className="truncate">{character.client_name}</span>
-              {typeof character.similarity === "number" ? <strong className="text-primary">{Math.round(character.similarity * 100)}%</strong> : null}
+      {characters.map((character) => {
+        const profile = safeProfile(character.profile);
+
+        return (
+          <Button
+            variant="ghost"
+            className={cn(
+              "h-auto flex-col items-stretch justify-start gap-0 overflow-hidden rounded-lg border bg-card p-0 text-left shadow-xs transition-colors hover:bg-muted",
+              selectedId === character.id && "border-primary ring-2 ring-primary/20"
+            )}
+            key={character.id}
+            type="button"
+            onClick={() => onSelect({ ...character, profile })}
+          >
+            <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
+              <img className="size-full object-cover" src={character.image_url} alt={profile.summary || character.file_name} />
+              <StatusBadge status={character.status} />
+              <div className="absolute inset-x-2 bottom-2 flex min-h-7 items-center justify-between gap-2 rounded-md border bg-card/90 px-2 py-1 text-xs font-semibold">
+                <span className="truncate">{character.client_name}</span>
+                {typeof character.similarity === "number" ? <strong className="text-primary">{Math.round(character.similarity * 100)}%</strong> : null}
+              </div>
             </div>
-          </div>
-          <div className="grid gap-2 p-2.5">
-            <div className="grid gap-0.5">
-              <strong className="line-clamp-2 text-sm font-semibold leading-snug">{character.profile.summary}</strong>
-              <span className="text-xs text-muted-foreground">{character.profile.shot_type}</span>
+            <div className="grid gap-2 p-2.5">
+              <div className="grid gap-0.5">
+                <strong className="line-clamp-2 text-sm font-semibold leading-snug">{profile.summary}</strong>
+                <span className="text-xs text-muted-foreground">{profile.shot_type}</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {profileChips(profile).map((chip) => (
+                  <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis text-muted-foreground" key={chip}>
+                    {chip}
+                  </Badge>
+                ))}
+              </div>
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {profileChips(character).map((chip) => (
-                <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis text-muted-foreground" key={chip}>
-                  {chip}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        </Button>
-      ))}
+          </Button>
+        );
+      })}
     </div>
   );
 }
 
 function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
-  const profile = character?.profile;
+  const profile = character ? safeProfile(character.profile) : null;
 
   if (!character || !profile) {
     return (
@@ -711,13 +717,30 @@ function StatusPill({ status }: { status: UploadItem["status"] }) {
   );
 }
 
-function profileChips(character: CharacterRecord) {
+function profileChips(profile: CharacterProfile) {
   return [
-    character.profile.apparent_age_range,
-    character.profile.gender_presentation,
-    character.profile.wardrobe[0],
-    character.profile.dominant_colors[0]
+    profile.apparent_age_range,
+    profile.gender_presentation,
+    profile.wardrobe[0],
+    profile.dominant_colors[0]
   ].filter(Boolean);
+}
+
+function safeProfile(profile: Partial<CharacterProfile> | null | undefined): CharacterProfile {
+  return {
+    summary: profile?.summary || "AI character reference image.",
+    apparent_age_range: profile?.apparent_age_range || "unknown",
+    gender_presentation: profile?.gender_presentation || "unknown",
+    wardrobe: Array.isArray(profile?.wardrobe) ? profile.wardrobe : [],
+    dominant_colors: Array.isArray(profile?.dominant_colors) ? profile.dominant_colors : [],
+    expression: profile?.expression || "unknown",
+    pose: profile?.pose || "unknown",
+    shot_type: profile?.shot_type || "unknown",
+    background: profile?.background || "unknown",
+    style: profile?.style || "realistic AI character reference",
+    quality_notes: profile?.quality_notes || "No quality notes generated.",
+    searchable_phrases: Array.isArray(profile?.searchable_phrases) ? profile.searchable_phrases : []
+  };
 }
 
 function statusTone(status: CharacterStatus | UploadItem["status"]) {

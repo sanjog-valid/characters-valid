@@ -1,5 +1,5 @@
 import { deploymentConfigError, env, isGeminiConfigured, isSupabaseConfigured, missingSupabaseEnv } from "@/lib/env";
-import { analyzeCharacterImage, buildSearchDocument, embedSearchText, toVectorLiteral } from "@/lib/gemini";
+import { analyzeCharacterImage, buildSearchDocument, embedSearchText, normalizeProfile, toVectorLiteral } from "@/lib/gemini";
 import { addMockCharacter, addMockClient, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type {
@@ -454,7 +454,7 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
     storage_path: row.storage_path,
     image_url: await signedImageUrl(row.storage_path),
     status: row.status,
-    profile: row.profile,
+    profile: normalizeProfile(row.profile),
     search_document: row.search_document,
     similarity: row.similarity,
     error_message: row.error_message,

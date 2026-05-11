@@ -173,20 +173,22 @@ export function toVectorLiteral(values: number[] | null) {
   return `[${values.map((value) => Number(value).toFixed(8)).join(",")}]`;
 }
 
-function normalizeProfile(value: Partial<CharacterProfile>): CharacterProfile {
+export function normalizeProfile(value: Partial<CharacterProfile> | null | undefined): CharacterProfile {
+  const profile = value || {};
+
   return {
-    summary: value.summary || "AI character reference image.",
-    apparent_age_range: value.apparent_age_range || "unknown",
-    gender_presentation: value.gender_presentation || "unknown",
-    wardrobe: normalizeList(value.wardrobe),
-    dominant_colors: normalizeList(value.dominant_colors),
-    expression: value.expression || "unknown",
-    pose: value.pose || "unknown",
-    shot_type: value.shot_type || "unknown",
-    background: value.background || "unknown",
-    style: value.style || "realistic AI character reference",
-    quality_notes: value.quality_notes || "No quality notes generated.",
-    searchable_phrases: normalizeList(value.searchable_phrases)
+    summary: profile.summary || "AI character reference image.",
+    apparent_age_range: profile.apparent_age_range || "unknown",
+    gender_presentation: profile.gender_presentation || "unknown",
+    wardrobe: normalizeList(profile.wardrobe),
+    dominant_colors: normalizeList(profile.dominant_colors),
+    expression: profile.expression || "unknown",
+    pose: profile.pose || "unknown",
+    shot_type: profile.shot_type || "unknown",
+    background: profile.background || "unknown",
+    style: profile.style || "realistic AI character reference",
+    quality_notes: profile.quality_notes || "No quality notes generated.",
+    searchable_phrases: normalizeList(profile.searchable_phrases)
   };
 }
 
