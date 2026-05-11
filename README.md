@@ -11,7 +11,7 @@ Internal character library for Valid.co editors. The app stores realistic AI cha
 - Client assignment is paused in the editor flow; the centrally maintained client list remains available for a later workflow.
 - AI-generated metadata and OpenAI embeddings are created server-side.
 - Upload rows are persisted before storage upload, so queued/processing records survive refreshes.
-- A Vercel cron processor analyzes small batches in the background.
+- The app kicks small OpenAI processing batches after upload and while processing rows are visible.
 - Supabase stores images, metadata, processing events, and pgvector embeddings.
 - The UI uses official shadcn/ui components generated into `components/ui`.
 
@@ -34,7 +34,6 @@ Copy `.env.example` to `.env.local` and fill the Supabase/OpenAI values.
 - `OPENAI_EMBEDDING_MODEL`
 - `OPENAI_EMBEDDING_DIMENSIONS`
 - `PROCESSOR_SECRET`
-- `CRON_SECRET`
 
 The OpenAI key is used for image analysis and embeddings. Rotate any key pasted into chat before using it in production.
 
@@ -52,12 +51,11 @@ Add only these secret values in Vercel Project Settings:
 
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `OPENAI_API_KEY`
-- `PROCESSOR_SECRET`
-- `CRON_SECRET` set to the same value as `PROCESSOR_SECRET` so Vercel cron can authenticate.
+- `PROCESSOR_SECRET` optional, for protected manual processor GET calls.
 
 Do not add `.env.local` to GitHub. Use `/api/health` on the deployed app to verify production runtime config; it returns missing variable names without exposing secret values.
 
-The upload flow is Vercel-safe: `/api/upload/sign` creates a queued character row and a short-lived Supabase signed upload URL, the browser sends image bytes directly to Supabase Storage, `/api/upload/complete` marks rows as processing, and `/api/process-pending` runs OpenAI analysis in background batches.
+The upload flow is Vercel-safe: `/api/upload/sign` creates a queued character row and a short-lived Supabase signed upload URL, the browser sends image bytes directly to Supabase Storage, `/api/upload/complete` marks rows as processing, and `/api/process-pending` runs small OpenAI analysis batches kicked by the app. The app does not rely on Vercel cron because Hobby projects cannot run every-minute schedules.
 
 ## Supabase
 

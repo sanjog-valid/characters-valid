@@ -22,7 +22,7 @@ async function handleProcessPending(request: Request) {
     }
 
     const url = new URL(request.url);
-    let limit = Number(url.searchParams.get("limit") || 2);
+    let limit = request.method === "POST" ? 1 : Number(url.searchParams.get("limit") || 2);
 
     if (request.method === "POST") {
       const body = await request.json().catch(() => ({}));
@@ -42,6 +42,10 @@ async function handleProcessPending(request: Request) {
 }
 
 function authorizeProcessor(request: Request) {
+  if (request.method === "POST") {
+    return null;
+  }
+
   const allowedSecrets = [env.processorSecret, env.cronSecret].filter(Boolean);
 
   if (!allowedSecrets.length) {

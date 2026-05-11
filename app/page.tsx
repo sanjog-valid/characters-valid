@@ -117,6 +117,7 @@ export default function Home() {
     }
 
     const handle = window.setInterval(() => {
+      kickProcessor();
       runSearch();
     }, 8000);
 
@@ -451,15 +452,7 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
         setError("");
       }
 
-      fetch("/api/process-pending", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ limit: 2 })
-      }).catch(() => {
-        // Cron will pick up processing rows if manual kick-off is not allowed.
-      });
+      kickProcessor();
 
       await onUploaded();
     } catch (uploadError) {
@@ -1040,6 +1033,18 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
     const message = cleanServerText(text);
     throw new Error(message || `Server returned ${response.status} instead of JSON.`);
   }
+}
+
+function kickProcessor() {
+  fetch("/api/process-pending", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ limit: 1 })
+  }).catch(() => {
+    // The next poll or upload action can kick the queue again.
+  });
 }
 
 function cleanServerText(value: string) {
