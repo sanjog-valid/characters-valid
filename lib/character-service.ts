@@ -3,6 +3,7 @@ import { analyzeCharacterImage, buildSearchDocument, embedSearchText, normalizeP
 import { addMockCharacter, addMockClient, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type {
+  CharacterProfile,
   CharacterRecord,
   CharacterStatus,
   ClientRecord,
@@ -27,6 +28,12 @@ type CharacterRow = {
   error_message?: string | null;
   created_at: string;
   updated_at?: string;
+};
+
+type CharacterDownloadRow = {
+  file_name: string;
+  mime_type: string;
+  storage_path: string;
 };
 
 export async function listClients(): Promise<ClientRecord[]> {
@@ -109,17 +116,19 @@ export async function listCharacters(input: {
 export async function searchCharacters(input: {
   query?: string;
   clientId?: string;
-  status?: CharacterStatus | "all";
+  gender?: string;
+  age?: string;
 }) {
   const cleanQuery = (input.query || "").trim();
   const supabase = getSupabaseAdmin();
 
   if (!supabase) {
-    return searchMockCharacters(input);
+    return filterLibraryCharacters(searchMockCharacters({ ...input, status: "ready" }), input);
   }
 
   if (!cleanQuery) {
-    return listCharacters({ clientId: input.clientId, status: input.status });
+    const characters = await listCharacters({ clientId: input.clientId, status: "ready" });
+    return filterLibraryCharacters(characters, input);
   }
 
   if (isGeminiConfigured()) {
@@ -130,14 +139,15 @@ export async function searchCharacters(input: {
         query_embedding: toVectorLiteral(embedding),
         match_count: 60,
         filter_client_id: input.clientId || null,
-        filter_status: input.status === "all" ? null : input.status || "ready"
+        filter_status: "ready"
       });
 
       if (error) {
         throw new Error(error.message);
       }
 
-      return Promise.all(((data || []) as CharacterRow[]).map((row) => mapCharacterRow(row)));
+      const characters = await Promise.all(((data || []) as CharacterRow[]).map((row) => mapCharacterRow(row)));
+      return filterLibraryCharacters(characters, input);
     }
   }
 
@@ -145,15 +155,12 @@ export async function searchCharacters(input: {
     .from("characters")
     .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
     .or(`search_document.ilike.%${cleanQuery}%,file_name.ilike.%${cleanQuery}%`)
+    .eq("status", "ready")
     .order("created_at", { ascending: false })
     .limit(60);
 
   if (input.clientId) {
     query = query.eq("client_id", input.clientId);
-  }
-
-  if (input.status && input.status !== "all") {
-    query = query.eq("status", input.status);
   }
 
   const { data, error } = await query;
@@ -162,7 +169,8 @@ export async function searchCharacters(input: {
     throw new Error(error.message);
   }
 
-  return Promise.all((data || []).map((row) => mapCharacterRow(row as CharacterRow)));
+  const characters = await Promise.all((data || []).map((row) => mapCharacterRow(row as CharacterRow)));
+  return filterLibraryCharacters(characters, input);
 }
 
 export async function uploadAndProcessCharacters(input: {
@@ -442,6 +450,44 @@ export async function processStoredUploads(input: { uploads: StoredUpload[] }) {
   return results;
 }
 
+export async function getCharacterDownload(id: string) {
+  const cleanId = id.trim();
+
+  if (!cleanId) {
+    throw new Error("Character id is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data: character, error: characterError } = await supabase
+    .from("characters")
+    .select("file_name,mime_type,storage_path")
+    .eq("id", cleanId)
+    .eq("status", "ready")
+    .single();
+
+  if (characterError || !character) {
+    throw new Error(characterError?.message || "Reference not found.");
+  }
+
+  const row = character as CharacterDownloadRow;
+  const { data, error } = await supabase.storage.from(env.storageBucket).download(row.storage_path);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return {
+    buffer: Buffer.from(await data.arrayBuffer()),
+    fileName: row.file_name,
+    mimeType: row.mime_type || "application/octet-stream"
+  };
+}
+
 async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
   const clientRelation = Array.isArray(row.clients) ? row.clients[0] : row.clients;
 
@@ -460,6 +506,103 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
     error_message: row.error_message,
     created_at: row.created_at,
     updated_at: row.updated_at
+  };
+}
+
+function filterLibraryCharacters(
+  characters: CharacterRecord[],
+  filters: {
+    gender?: string;
+    age?: string;
+  }
+) {
+  return characters.filter((character) => {
+    const profile = normalizeProfile(character.profile);
+
+    return genderMatches(profile, filters.gender) && ageMatches(profile, filters.age);
+  });
+}
+
+function genderMatches(profile: CharacterProfile, gender?: string) {
+  const filter = (gender || "all").toLowerCase();
+
+  if (filter === "all") {
+    return true;
+  }
+
+  const value = profile.gender_presentation.toLowerCase();
+
+  if (filter === "feminine") {
+    return value.includes("feminine") || /\bfemale\b/.test(value) || /\bwoman\b/.test(value);
+  }
+
+  if (filter === "masculine") {
+    return value.includes("masculine") || /\bmale\b/.test(value) || /\bman\b/.test(value);
+  }
+
+  if (filter === "androgynous") {
+    return value.includes("androgynous") || value.includes("nonbinary") || value.includes("non-binary");
+  }
+
+  return true;
+}
+
+function ageMatches(profile: CharacterProfile, age?: string) {
+  const filter = (age || "all").toLowerCase();
+
+  if (filter === "all") {
+    return true;
+  }
+
+  const [minimum, maximum] = ageRangeBounds(filter);
+  const profileRange = parseAgeRange(profile.apparent_age_range);
+
+  if (!profileRange) {
+    return false;
+  }
+
+  return profileRange.maximum >= minimum && profileRange.minimum <= maximum;
+}
+
+function ageRangeBounds(value: string): [number, number] {
+  if (value === "18-29") {
+    return [18, 29];
+  }
+
+  if (value === "30-39") {
+    return [30, 39];
+  }
+
+  if (value === "40-49") {
+    return [40, 49];
+  }
+
+  if (value === "50-59") {
+    return [50, 59];
+  }
+
+  if (value === "60-plus") {
+    return [60, 120];
+  }
+
+  return [0, 120];
+}
+
+function parseAgeRange(value: string) {
+  const numbers = value.match(/\d+/g)?.map((item) => Number(item)).filter((item) => Number.isFinite(item));
+
+  if (!numbers?.length) {
+    return null;
+  }
+
+  if (numbers.length === 1) {
+    const age = numbers[0];
+    return { minimum: age, maximum: age };
+  }
+
+  return {
+    minimum: Math.min(numbers[0], numbers[1]),
+    maximum: Math.max(numbers[0], numbers[1])
   };
 }
 

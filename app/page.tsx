@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  Check,
   Copy,
   Database,
   Download,
@@ -22,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import type { CharacterProfile, CharacterRecord, CharacterStatus, SignedUploadIntent } from "@/lib/types";
+import type { CharacterProfile, CharacterRecord, SignedUploadIntent } from "@/lib/types";
 
 type UploadItem = {
   id: string;
@@ -32,14 +33,31 @@ type UploadItem = {
 };
 
 type ViewMode = "library" | "upload";
+type GenderFilter = "all" | "feminine" | "masculine" | "androgynous";
+type AgeFilter = "all" | "18-29" | "30-39" | "40-49" | "50-59" | "60-plus";
 
-const statusOptions: Array<CharacterStatus | "all"> = ["all", "ready", "processing", "failed", "queued"];
+const genderOptions: Array<{ label: string; value: GenderFilter }> = [
+  { label: "All genders", value: "all" },
+  { label: "Feminine", value: "feminine" },
+  { label: "Masculine", value: "masculine" },
+  { label: "Androgynous", value: "androgynous" }
+];
+
+const ageOptions: Array<{ label: string; value: AgeFilter }> = [
+  { label: "All ages", value: "all" },
+  { label: "18-29", value: "18-29" },
+  { label: "30-39", value: "30-39" },
+  { label: "40-49", value: "40-49" },
+  { label: "50-59", value: "50-59" },
+  { label: "60+", value: "60-plus" }
+];
 
 export default function Home() {
   const [characters, setCharacters] = useState<CharacterRecord[]>([]);
   const [selected, setSelected] = useState<CharacterRecord | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<CharacterStatus | "all">("all");
+  const [genderFilter, setGenderFilter] = useState<GenderFilter>("all");
+  const [ageFilter, setAgeFilter] = useState<AgeFilter>("all");
   const [activeView, setActiveView] = useState<ViewMode>("library");
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
@@ -57,7 +75,8 @@ export default function Home() {
         },
         body: JSON.stringify({
           query,
-          status: statusFilter
+          gender: genderFilter,
+          age: ageFilter
         })
       });
       const payload = await response.json();
@@ -82,7 +101,7 @@ export default function Home() {
       setSearching(false);
       setLoading(false);
     }
-  }, [query, statusFilter]);
+  }, [query, genderFilter, ageFilter]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -171,34 +190,45 @@ export default function Home() {
           aria-hidden={activeView !== "library"}
         >
             <section className="grid min-w-0 gap-5">
-              <Card>
-                <CardContent className="grid grid-cols-[minmax(280px,1fr)_156px] gap-2 p-2 max-md:grid-cols-1">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      className="pl-9 pr-9"
-                      value={query}
-                      onChange={(event) => setQuery(event.target.value)}
-                      placeholder="50 year old man black shirt"
-                      aria-label="Search characters"
-                    />
-                    {searching ? <Loader2 className="spin absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /> : null}
-                  </div>
+              <div className="grid grid-cols-[minmax(280px,1fr)_156px_156px] gap-2 max-md:grid-cols-1">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    className="pl-9 pr-9"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="50 year old man black shirt"
+                    aria-label="Search characters"
+                  />
+                  {searching ? <Loader2 className="spin absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /> : null}
+                </div>
 
-                  <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CharacterStatus | "all")}>
-                    <SelectTrigger aria-label="Status filter">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {statusOptions.map((status) => (
-                        <SelectItem key={status} value={status}>
-                          {status === "all" ? "All statuses" : titleCase(status)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </CardContent>
-              </Card>
+                <Select value={genderFilter} onValueChange={(value) => setGenderFilter(value as GenderFilter)}>
+                  <SelectTrigger aria-label="Gender filter">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {genderOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <Select value={ageFilter} onValueChange={(value) => setAgeFilter(value as AgeFilter)}>
+                  <SelectTrigger aria-label="Age filter">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ageOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
               <CharacterGrid characters={characters} selectedId={selected?.id} onSelect={setSelected} loading={loading} />
             </section>
@@ -589,16 +619,14 @@ function CharacterGrid({
           >
             <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
               <img className="size-full object-cover" src={character.image_url} alt={profile.summary || character.file_name} />
-              <StatusBadge status={character.status} />
-              <div className="absolute inset-x-2 bottom-2 flex min-h-7 items-center justify-between gap-2 rounded-md border bg-card/90 px-2 py-1 text-xs font-semibold">
-                <span className="truncate">{character.client_name}</span>
-                {typeof character.similarity === "number" ? <strong className="text-primary">{Math.round(character.similarity * 100)}%</strong> : null}
-              </div>
             </div>
             <div className="grid gap-2 p-2.5">
               <div className="grid gap-0.5">
-                <strong className="line-clamp-2 text-sm font-semibold leading-snug">{profile.summary}</strong>
-                <span className="text-xs text-muted-foreground">{profile.shot_type}</span>
+                <div className="flex items-start justify-between gap-2">
+                  <strong className="line-clamp-2 text-sm font-semibold leading-snug">{profile.summary}</strong>
+                  {typeof character.similarity === "number" ? <span className="shrink-0 text-xs font-semibold text-primary">{Math.round(character.similarity * 100)}%</span> : null}
+                </div>
+                <span className="truncate text-xs text-muted-foreground">{profile.shot_type}</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {profileChips(profile).map((chip) => (
@@ -617,6 +645,12 @@ function CharacterGrid({
 
 function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
   const profile = character ? safeProfile(character.profile) : null;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    setCopyState("idle");
+  }, [character?.id]);
 
   if (!character || !profile) {
     return (
@@ -630,8 +664,45 @@ function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
   }
 
   async function copyImageUrl() {
-    if (character?.image_url) {
-      await navigator.clipboard.writeText(character.image_url);
+    if (!character?.image_url) {
+      return;
+    }
+
+    try {
+      await copyText(character.image_url);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1800);
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
+  async function downloadReference() {
+    if (!character?.image_url || downloading) {
+      return;
+    }
+
+    setDownloading(true);
+
+    try {
+      const response = await fetch(`/api/download?id=${encodeURIComponent(character.id)}`);
+
+      if (!response.ok) {
+        throw new Error("Download failed.");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = objectUrl;
+      link.download = character.file_name || "character-reference";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } finally {
+      setDownloading(false);
     }
   }
 
@@ -639,26 +710,22 @@ function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
     <Card className="sticky top-[92px] overflow-hidden max-xl:static">
       <div className="relative aspect-[4/4.7] bg-secondary">
         <img className="size-full object-cover" src={character.image_url} alt={profile.summary} />
-        <StatusBadge status={character.status} />
       </div>
 
       <CardHeader>
-        <p className="text-[11px] font-bold uppercase leading-none text-muted-foreground">{character.client_name}</p>
         <CardTitle className="text-[17px] leading-snug">{profile.summary}</CardTitle>
         <CardDescription className="break-words">{character.file_name}</CardDescription>
       </CardHeader>
 
       <CardContent className="grid gap-4">
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" asChild>
-            <a href={character.image_url} download={character.file_name}>
-              <Download />
-              Download reference
-            </a>
+          <Button variant="outline" type="button" onClick={downloadReference} disabled={downloading}>
+            {downloading ? <Loader2 className="spin" /> : <Download />}
+            {downloading ? "Downloading" : "Download reference"}
           </Button>
           <Button variant="outline" type="button" onClick={copyImageUrl}>
-            <Copy />
-            Copy reference
+            {copyState === "copied" ? <Check /> : <Copy />}
+            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy reference"}
           </Button>
         </div>
 
@@ -701,14 +768,6 @@ function Attribute({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: CharacterStatus }) {
-  return (
-    <Badge variant="outline" className={cn("absolute left-2 top-2 capitalize", statusTone(status))}>
-      {status}
-    </Badge>
-  );
-}
-
 function StatusPill({ status }: { status: UploadItem["status"] }) {
   return (
     <Badge variant="outline" className={cn("justify-center capitalize", statusTone(status))}>
@@ -743,8 +802,8 @@ function safeProfile(profile: Partial<CharacterProfile> | null | undefined): Cha
   };
 }
 
-function statusTone(status: CharacterStatus | UploadItem["status"]) {
-  if (status === "ready" || status === "done") {
+function statusTone(status: UploadItem["status"]) {
+  if (status === "done") {
     return "border-success/20 bg-success/10 text-success";
   }
 
@@ -791,10 +850,6 @@ function progressWidth(status: UploadItem["status"]) {
   return "20%";
 }
 
-function titleCase(value: string) {
-  return value.slice(0, 1).toUpperCase() + value.slice(1);
-}
-
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return Array.from(dataTransfer.types).includes("Files");
 }
@@ -825,4 +880,26 @@ function formatBytes(value: number) {
   }
 
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
 }

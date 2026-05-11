@@ -42,7 +42,8 @@ export type CharacterRecord = {
 export type SearchRequest = {
   query?: string;
   clientId?: string;
-  status?: CharacterStatus | "all";
+  gender?: string;
+  age?: string;
 };
 
 export type UploadAssignment = {
