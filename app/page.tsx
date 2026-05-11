@@ -30,7 +30,7 @@ type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "queued" | "signing" | "uploading" | "uploaded" | "failed";
+  status: "selected" | "signing" | "uploading" | "uploaded" | "failed";
 };
 
 type ViewMode = "library" | "upload";
@@ -89,11 +89,7 @@ export default function Home() {
 
       setCharacters(characters);
       setSelected((current) => {
-        if (!current) {
-          return characters[0] || null;
-        }
-
-        return characters.find((character) => character.id === current.id) || characters[0] || null;
+        return current ? characters.find((character) => character.id === current.id) || null : null;
       });
     } catch (searchError) {
       setError(searchError instanceof Error ? searchError.message : "Search failed.");
@@ -106,7 +102,7 @@ export default function Home() {
   useEffect(() => {
     const handle = window.setTimeout(() => {
       runSearch();
-    }, 350);
+    }, 220);
 
     return () => window.clearTimeout(handle);
   }, [runSearch]);
@@ -129,10 +125,14 @@ export default function Home() {
       const nextCharacters = characters.filter((character) => character.id !== deletedId);
 
       setCharacters(nextCharacters);
-      setSelected((current) => (current?.id === deletedId ? nextCharacters[0] || null : current));
+      setSelected((current) => (current?.id === deletedId ? null : current));
     },
     [characters]
   );
+
+  const handleCharacterSelect = useCallback((character: CharacterRecord) => {
+    setSelected((current) => (current?.id === character.id ? null : character));
+  }, []);
 
   return (
     <main className="grid min-h-screen grid-cols-[232px_minmax(0,1fr)] bg-background text-foreground max-lg:grid-cols-1">
@@ -212,13 +212,14 @@ export default function Home() {
 
         <div
           className={cn(
-            "grid grid-cols-[minmax(0,1fr)_400px] items-start gap-4 px-6 py-4 max-xl:grid-cols-1 max-sm:px-4",
+            "grid items-start px-6 py-4 max-sm:px-4",
+            selected ? "grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1" : "grid-cols-1",
             activeView !== "library" && "hidden"
           )}
           aria-hidden={activeView !== "library"}
         >
             <section className="grid min-w-0 gap-5">
-              <div className="grid grid-cols-[minmax(280px,1fr)_156px_156px] gap-2 max-md:grid-cols-1">
+              <div className="grid grid-cols-[minmax(280px,1fr)_140px_112px] gap-2 max-md:grid-cols-1">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -258,10 +259,14 @@ export default function Home() {
                 </Select>
               </div>
 
-              <CharacterGrid characters={characters} selectedId={selected?.id} onSelect={setSelected} loading={loading} />
+              <CharacterGrid characters={characters} selectedId={selected?.id} onSelect={handleCharacterSelect} loading={loading} />
             </section>
 
-            <CharacterDrawer character={selected} onDeleted={handleCharacterDeleted} />
+            {selected ? (
+              <aside className="border-l pl-4 max-xl:border-l-0 max-xl:border-t max-xl:pl-0 max-xl:pt-4">
+                <CharacterDrawer character={selected} onDeleted={handleCharacterDeleted} />
+              </aside>
+            ) : null}
           </div>
       </section>
     </main>
@@ -285,9 +290,9 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
-  const uploadableItems = items.filter((item) => item.status === "queued" || item.status === "failed");
+  const uploadableItems = items.filter((item) => item.status === "selected" || item.status === "failed");
   const uploadSummary = items.length
-    ? `${uploadableItems.length} pending${items.length - uploadableItems.length ? `, ${items.length - uploadableItems.length} uploading` : ""}`
+    ? `${uploadableItems.length} selected${items.length - uploadableItems.length ? `, ${items.length - uploadableItems.length} uploading` : ""}`
     : "Drop images here when they are ready for analysis.";
 
   const addFiles = useCallback((files: FileList | File[]) => {
@@ -297,7 +302,7 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
         id: crypto.randomUUID(),
         file,
         previewUrl: URL.createObjectURL(file),
-        status: "queued" as const
+        status: "selected" as const
       }));
 
     if (!nextItems.length) {
@@ -633,49 +638,67 @@ function CharacterGrid({
 
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-3 max-sm:grid-cols-1">
-      {characters.map((character) => {
+      {characters.map((character, index) => {
         const profile = safeProfile(character.profile);
         const isReady = character.status === "ready";
 
         return (
-          <Button
-            variant="ghost"
+          <article
             className={cn(
-              "h-auto flex-col items-stretch justify-start gap-0 overflow-hidden rounded-lg border bg-card p-0 text-left shadow-xs transition-colors hover:bg-muted",
+              "group relative overflow-hidden rounded-lg border bg-card text-left shadow-xs transition-colors hover:bg-muted",
               selectedId === character.id && "border-primary ring-2 ring-primary/20"
             )}
             key={character.id}
-            type="button"
-            onClick={() => onSelect({ ...character, profile })}
           >
-            <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
-              <img className="size-full object-cover" src={character.image_url} alt={profile.summary || character.file_name} />
-              {!isReady ? (
-                <div className="absolute inset-0 grid place-items-center bg-background/70 backdrop-blur-[2px]">
-                  <Badge variant="outline" className={cn("gap-1.5", statusTone(character.status))}>
-                    {character.status === "processing" ? <Loader2 className="spin size-3" /> : null}
-                    {libraryStatusLabel(character)}
-                  </Badge>
-                </div>
-              ) : null}
-            </div>
-            <div className="grid gap-2 p-2.5">
-              <div className="grid gap-0.5">
-                <div className="flex items-start justify-between gap-2">
-                  <strong className="line-clamp-2 text-sm font-semibold leading-snug">{profile.summary}</strong>
-                  {typeof character.similarity === "number" ? <span className="shrink-0 text-xs font-semibold text-primary">{Math.round(character.similarity * 100)}%</span> : null}
-                </div>
-                <span className="truncate text-xs text-muted-foreground">{profile.shot_type}</span>
+            <button className="block h-full w-full text-left" type="button" onClick={() => onSelect({ ...character, profile })}>
+              <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
+                <img
+                  className="size-full object-cover"
+                  src={character.image_url}
+                  alt={profile.summary || character.file_name}
+                  loading={index < 12 ? "eager" : "lazy"}
+                  decoding="async"
+                  fetchPriority={index < 6 ? "high" : "auto"}
+                />
+                {!isReady ? (
+                  <div className="absolute inset-0 grid place-items-center bg-black/55 backdrop-blur-[2px]">
+                    <Badge variant="outline" className={cn("gap-1.5 shadow-sm", statusTone(character.status))}>
+                      {character.status === "processing" ? <Loader2 className="spin size-3" /> : null}
+                      {libraryStatusLabel(character)}
+                    </Badge>
+                  </div>
+                ) : null}
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {profileChips(profile).map((chip) => (
-                  <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis text-muted-foreground" key={chip}>
-                    {chip}
-                  </Badge>
-                ))}
+              <div className="grid gap-2 px-3 py-3">
+                <div className="grid gap-0.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <strong className="line-clamp-2 text-[13px] font-semibold leading-snug">{profile.summary}</strong>
+                    {typeof character.similarity === "number" ? <span className="shrink-0 text-xs font-semibold text-primary">{Math.round(character.similarity * 100)}%</span> : null}
+                  </div>
+                  <span className="truncate text-xs text-muted-foreground">{profile.shot_type}</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {profileChips(profile).map((chip) => (
+                    <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis px-2 py-0 text-[11px] text-muted-foreground" key={chip}>
+                      {chip}
+                    </Badge>
+                  ))}
+                </div>
               </div>
-            </div>
-          </Button>
+            </button>
+
+            <button
+              type="button"
+              className="absolute right-2 top-2 z-10 grid size-8 place-items-center rounded-md border bg-background/90 text-foreground opacity-0 shadow-sm backdrop-blur transition hover:bg-background group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={`Download ${character.file_name}`}
+              title="Download"
+              onClick={() => {
+                void downloadCharacterReference(character);
+              }}
+            >
+              <Download className="size-4" />
+            </button>
+          </article>
         );
       })}
     </div>
@@ -706,13 +729,13 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
     );
   }
 
-  async function copyImageUrl() {
+  async function copyReferenceImage() {
     if (!character?.image_url) {
       return;
     }
 
     try {
-      await copyText(character.image_url);
+      await copyCharacterImageToClipboard(character);
       setCopyState("copied");
       window.setTimeout(() => setCopyState("idle"), 1800);
     } catch {
@@ -728,22 +751,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
     setDownloading(true);
 
     try {
-      const response = await fetch(`/api/download?id=${encodeURIComponent(character.id)}`);
-
-      if (!response.ok) {
-        throw new Error("Download failed.");
-      }
-
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-
-      link.href = objectUrl;
-      link.download = character.file_name || "character-reference";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(objectUrl);
+      await downloadCharacterReference(character);
     } finally {
       setDownloading(false);
     }
@@ -786,39 +794,40 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
 
   return (
     <Card className="sticky top-[92px] overflow-hidden max-xl:static">
-      <div className="relative aspect-[4/4.7] bg-secondary">
-        <img className="size-full object-cover" src={character.image_url} alt={profile.summary} />
+      <div className="relative h-[260px] bg-secondary">
+        <img className="size-full object-cover" src={character.image_url} alt={profile.summary} loading="eager" decoding="async" fetchPriority="high" />
       </div>
 
-      <CardHeader>
+      <CardHeader className="gap-1.5 p-4">
         {character.status !== "ready" ? (
           <Badge variant="outline" className={cn("mb-2 w-fit gap-1.5", statusTone(character.status))}>
             {character.status === "processing" ? <Loader2 className="spin size-3" /> : null}
             {libraryStatusLabel(character)}
           </Badge>
         ) : null}
-        <CardTitle className="text-[17px] leading-snug">{profile.summary}</CardTitle>
-        <CardDescription className="break-words">{character.file_name}</CardDescription>
+        <CardTitle className="text-[15px] leading-snug">{profile.summary}</CardTitle>
+        <CardDescription className="break-words text-xs">{character.file_name}</CardDescription>
       </CardHeader>
 
-      <CardContent className="grid gap-4">
+      <CardContent className="grid gap-3 p-4 pt-0">
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" type="button" onClick={downloadReference} disabled={downloading}>
+          <Button className="h-8 px-2.5 text-xs" variant="outline" type="button" onClick={downloadReference} disabled={downloading}>
             {downloading ? <Loader2 className="spin" /> : <Download />}
-            {downloading ? "Downloading" : "Download reference"}
+            {downloading ? "Downloading" : "Download"}
           </Button>
-          <Button variant="outline" type="button" onClick={copyImageUrl}>
+          <Button className="h-8 px-2.5 text-xs" variant="outline" type="button" onClick={copyReferenceImage}>
             {copyState === "copied" ? <Check /> : <Copy />}
-            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy reference"}
+            {copyState === "copied" ? "Copied PNG" : copyState === "failed" ? "Copy failed" : "Copy PNG"}
           </Button>
           <Button
+            className="h-8 px-2.5 text-xs"
             variant={deleteState === "confirming" || deleteState === "deleting" ? "destructive" : "outline"}
             type="button"
             onClick={deleteReference}
             disabled={deleteState === "deleting"}
           >
             {deleteState === "deleting" ? <Loader2 className="spin" /> : <Trash2 />}
-            {deleteState === "deleting" ? "Deleting" : deleteState === "confirming" ? "Confirm delete" : "Delete reference"}
+            {deleteState === "deleting" ? "Deleting" : deleteState === "confirming" ? "Confirm delete" : "Delete"}
           </Button>
         </div>
 
@@ -845,10 +854,10 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
         </Table>
 
         <div>
-          <p className="mb-2 text-xs font-bold text-muted-foreground">Search phrases</p>
+          <p className="mb-2 text-[11px] font-bold text-muted-foreground">Search phrases</p>
           <div className="flex flex-wrap gap-1.5">
             {profile.searchable_phrases.map((phrase) => (
-              <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis text-muted-foreground" key={phrase}>
+              <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis px-2 py-0 text-[11px] text-muted-foreground" key={phrase}>
                 {phrase}
               </Badge>
             ))}
@@ -862,8 +871,8 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
 function Attribute({ label, value }: { label: string; value: string }) {
   return (
     <TableRow>
-      <TableCell className="w-28 align-top text-xs font-semibold text-muted-foreground">{label}</TableCell>
-      <TableCell className="break-words whitespace-normal align-top text-sm leading-snug">{value}</TableCell>
+      <TableCell className="w-24 align-top text-[11px] font-semibold text-muted-foreground">{label}</TableCell>
+      <TableCell className="break-words whitespace-normal align-top text-xs leading-snug">{value}</TableCell>
     </TableRow>
   );
 }
@@ -871,7 +880,7 @@ function Attribute({ label, value }: { label: string; value: string }) {
 function StatusPill({ status }: { status: UploadItem["status"] }) {
   return (
     <Badge variant="outline" className={cn("justify-center capitalize", statusTone(status))}>
-      {status === "uploaded" ? "Uploaded" : status}
+      {status === "selected" ? "Selected" : status === "uploaded" ? "Uploaded" : status}
     </Badge>
   );
 }
@@ -998,25 +1007,77 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-async function copyText(value: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
+async function downloadCharacterReference(character: CharacterRecord) {
+  const response = await fetch(`/api/download?id=${encodeURIComponent(character.id)}`);
+
+  if (!response.ok) {
+    throw new Error("Download failed.");
   }
 
-  const textarea = document.createElement("textarea");
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
 
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
+  link.href = objectUrl;
+  link.download = character.file_name || "character-reference";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function copyCharacterImageToClipboard(character: CharacterRecord) {
+  if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
+    throw new Error("Image clipboard is not supported in this browser.");
+  }
+
+  const response = await fetch(`/api/download?id=${encodeURIComponent(character.id)}`);
+
+  if (!response.ok) {
+    throw new Error("Copy failed.");
+  }
+
+  const sourceBlob = await response.blob();
+  const pngBlob = sourceBlob.type === "image/png" ? sourceBlob : await convertImageBlobToPng(sourceBlob);
+
+  await navigator.clipboard.write([
+    new ClipboardItem({
+      "image/png": pngBlob
+    })
+  ]);
+}
+
+async function convertImageBlobToPng(blob: Blob) {
+  const imageUrl = URL.createObjectURL(blob);
+  const image = new Image();
+
+  image.decoding = "async";
+  image.src = imageUrl;
 
   try {
-    document.execCommand("copy");
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Canvas is not available.");
+    }
+
+    context.drawImage(image, 0, 0);
+
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((pngBlob) => {
+        if (pngBlob) {
+          resolve(pngBlob);
+        } else {
+          reject(new Error("PNG conversion failed."));
+        }
+      }, "image/png");
+    });
   } finally {
-    textarea.remove();
+    URL.revokeObjectURL(imageUrl);
   }
 }
 
