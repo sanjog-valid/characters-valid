@@ -669,17 +669,17 @@ function CharacterGrid({
                   </div>
                 ) : null}
               </div>
-              <div className="grid min-h-0 gap-2 overflow-hidden px-3 py-3">
-                <div className="grid gap-0.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <strong className="line-clamp-2 text-[13px] font-semibold leading-snug">{profile.summary}</strong>
+              <div className="grid min-h-0 gap-2 overflow-hidden py-3 pl-3 pr-4">
+                <div className="grid min-w-0 gap-0.5">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <strong className="min-w-0 break-words pr-1 text-[13px] font-semibold leading-snug line-clamp-2">{profile.summary}</strong>
                     {typeof character.similarity === "number" ? <span className="shrink-0 text-xs font-semibold text-primary">{Math.round(character.similarity * 100)}%</span> : null}
                   </div>
-                  <span className="truncate text-xs text-muted-foreground">{profile.shot_type}</span>
+                  <span className="min-w-0 truncate pr-1 text-xs text-muted-foreground">{profile.shot_type}</span>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex min-w-0 flex-wrap gap-1.5 pr-1">
                   {profileChips(profile).map((chip) => (
-                    <Badge variant="outline" className="max-w-full overflow-hidden text-ellipsis px-2 py-0 text-[11px] text-muted-foreground" key={chip}>
+                    <Badge variant="outline" className="max-w-[calc(100%-4px)] overflow-hidden text-ellipsis px-2 py-0 text-[11px] text-muted-foreground" key={chip}>
                       {chip}
                     </Badge>
                   ))}
