@@ -212,13 +212,13 @@ export default function Home() {
 
         <div
           className={cn(
-            "grid items-start px-6 py-4 max-sm:px-4",
+            "grid h-[calc(100vh-78px)] min-h-0 items-stretch overflow-hidden px-6 py-4 max-xl:h-auto max-xl:overflow-visible max-sm:px-4",
             selected ? "grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1" : "grid-cols-1",
             activeView !== "library" && "hidden"
           )}
           aria-hidden={activeView !== "library"}
         >
-            <section className="grid min-w-0 gap-5">
+            <section className="grid min-h-0 min-w-0 gap-5 overflow-y-auto pr-1 max-xl:overflow-visible max-xl:pr-0">
               <div className="grid grid-cols-[minmax(280px,1fr)_140px_112px] gap-2 max-md:grid-cols-1">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -263,7 +263,7 @@ export default function Home() {
             </section>
 
             {selected ? (
-              <aside className="border-l pl-4 max-xl:border-l-0 max-xl:border-t max-xl:pl-0 max-xl:pt-4">
+              <aside className="min-h-0 overflow-y-auto border-l pl-4 max-xl:overflow-visible max-xl:border-l-0 max-xl:border-t max-xl:pl-0 max-xl:pt-4">
                 <CharacterDrawer character={selected} onDeleted={handleCharacterDeleted} />
               </aside>
             ) : null}
@@ -645,15 +645,15 @@ function CharacterGrid({
         return (
           <article
             className={cn(
-              "group relative overflow-hidden rounded-lg border bg-card text-left shadow-xs transition-colors hover:bg-muted",
+              "group relative h-[424px] overflow-hidden rounded-lg border bg-card text-left shadow-xs transition-colors hover:bg-muted max-sm:h-auto",
               selectedId === character.id && "border-primary ring-2 ring-primary/20"
             )}
             key={character.id}
           >
-            <button className="block h-full w-full text-left" type="button" onClick={() => onSelect({ ...character, profile })}>
-              <div className="relative aspect-[4/5] overflow-hidden bg-secondary">
+            <button className="grid h-full w-full grid-rows-[255px_minmax(0,1fr)] text-left max-sm:grid-rows-none" type="button" onClick={() => onSelect({ ...character, profile })}>
+              <div className="relative h-[255px] overflow-hidden bg-secondary max-sm:aspect-[4/5] max-sm:h-auto">
                 <img
-                  className="size-full object-cover"
+                  className="size-full scale-[1.035] object-cover"
                   src={character.image_url}
                   alt={profile.summary || character.file_name}
                   loading={index < 12 ? "eager" : "lazy"}
@@ -669,7 +669,7 @@ function CharacterGrid({
                   </div>
                 ) : null}
               </div>
-              <div className="grid gap-2 px-3 py-3">
+              <div className="grid min-h-0 gap-2 overflow-hidden px-3 py-3">
                 <div className="grid gap-0.5">
                   <div className="flex items-start justify-between gap-2">
                     <strong className="line-clamp-2 text-[13px] font-semibold leading-snug">{profile.summary}</strong>
@@ -793,9 +793,16 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
   }
 
   return (
-    <Card className="sticky top-[92px] overflow-hidden max-xl:static">
-      <div className="relative h-[260px] bg-secondary">
-        <img className="size-full object-cover" src={character.image_url} alt={profile.summary} loading="eager" decoding="async" fetchPriority="high" />
+    <Card className="overflow-hidden">
+      <div className="relative flex max-h-[250px] items-center justify-center bg-secondary p-2">
+        <img
+          className="max-h-[234px] w-full object-contain"
+          src={character.image_url}
+          alt={profile.summary}
+          loading="eager"
+          decoding="async"
+          fetchPriority="high"
+        />
       </div>
 
       <CardHeader className="gap-1.5 p-4">
