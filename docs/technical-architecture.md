@@ -11,7 +11,7 @@
 ## Authentication
 
 - Authentication is disabled for now so anyone with the internal link can use the app.
-- The browser only calls Next.js API routes.
+- The browser calls Next.js API routes for search, upload signing, and post-upload processing.
 - The service-role key stays server-only.
 - Supabase RLS policies remain in the migration history for a later authenticated mode, but the current server API uses the service role for database and storage work.
 
@@ -19,15 +19,19 @@
 
 ```mermaid
 flowchart LR
-  A["Editor uploads images"] --> B["Server route receives files"]
-  B --> C["Supabase Storage private bucket"]
-  B --> D["characters row: processing"]
-  B --> E["Gemini vision structured analysis"]
-  E --> F["Search document"]
-  F --> G["Gemini embedding"]
-  G --> H["characters row: ready + vector"]
-  H --> I["Search grid"]
+  A["Editor selects images"] --> B["/api/upload/sign creates signed upload URLs"]
+  B --> C["Browser uploads image bytes to Supabase Storage"]
+  C --> D["/api/upload receives storage paths"]
+  D --> E["Server downloads private image from Supabase"]
+  E --> F["characters row: processing"]
+  E --> G["Gemini vision structured analysis"]
+  G --> H["Search document"]
+  H --> I["Gemini embedding"]
+  I --> J["characters row: ready + vector"]
+  J --> K["Search grid"]
 ```
+
+Image bytes do not pass through Vercel Functions. The processing API receives JSON metadata and storage paths only, which avoids Vercel request body limits.
 
 ## Search Pipeline
 
@@ -39,7 +43,7 @@ flowchart LR
   D --> E["Ranked results"]
 ```
 
-If Gemini is unavailable, uploaded records use fallback metadata and text search. Supabase is required for the authenticated internal app.
+If Gemini is unavailable, uploaded records use fallback metadata and text search. Supabase is required for the internal hosted app.
 
 ## Supabase Tables
 

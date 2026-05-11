@@ -22,13 +22,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import type { CharacterRecord, CharacterStatus } from "@/lib/types";
+import type { CharacterRecord, CharacterStatus, SignedUploadIntent } from "@/lib/types";
 
 type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "queued" | "uploading" | "done" | "failed";
+  status: "queued" | "uploading" | "processing" | "done" | "failed";
 };
 
 type ViewMode = "library" | "upload";
@@ -303,27 +303,92 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
     setError("");
     setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "uploading" } : item)));
 
-    const formData = new FormData();
-
-    uploadableItems.forEach((item) => {
-      formData.append("files", item.file, item.file.name);
-    });
-
     try {
-      const response = await fetch("/api/upload", {
+      const signResponse = await fetch("/api/upload/sign", {
         method: "POST",
-        body: formData
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          files: uploadableItems.map((item) => ({
+            clientUploadId: item.id,
+            fileName: item.file.name,
+            mimeType: item.file.type || "application/octet-stream",
+            size: item.file.size
+          }))
+        })
       });
-      const payload = await response.json();
+      const signPayload = await signResponse.json();
 
-      if (!response.ok) {
-        throw new Error(payload.error || "Upload failed.");
+      if (!signResponse.ok) {
+        throw new Error(signPayload.error || "Could not prepare uploads.");
       }
 
-      setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "done" } : item)));
+      const intents = (signPayload.uploads || []) as SignedUploadIntent[];
+      const uploadedIntents: SignedUploadIntent[] = [];
+
+      for (const intent of intents) {
+        const item = uploadableItems.find((candidate) => candidate.id === intent.clientUploadId);
+
+        if (!item) {
+          continue;
+        }
+
+        try {
+          await uploadFileToSignedUrl(intent.signedUrl, item.file);
+          uploadedIntents.push(intent);
+          setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "processing" } : currentItem)));
+        } catch (directUploadError) {
+          setItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, status: "failed" } : currentItem)));
+          setError(directUploadError instanceof Error ? `${item.file.name}: ${directUploadError.message}` : `${item.file.name}: Upload failed.`);
+        }
+      }
+
+      if (!uploadedIntents.length) {
+        throw new Error("Upload failed.");
+      }
+
+      const processResponse = await fetch("/api/upload", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          uploads: uploadedIntents.map((intent) => ({
+            clientUploadId: intent.clientUploadId,
+            id: intent.id,
+            storagePath: intent.storagePath,
+            fileName: intent.fileName,
+            mimeType: intent.mimeType
+          }))
+        })
+      });
+      const processPayload = await processResponse.json();
+
+      if (!processResponse.ok) {
+        throw new Error(processPayload.error || "Processing failed.");
+      }
+
+      const processedCharacters = (processPayload.characters || []) as CharacterRecord[];
+      const failedPaths = new Set(processedCharacters.filter((character) => character.status === "failed").map((character) => character.storage_path));
+      const pathByClientUploadId = new Map(uploadedIntents.map((intent) => [intent.clientUploadId, intent.storagePath]));
+
+      setItems((current) =>
+        current.map((item) => {
+          const storagePath = pathByClientUploadId.get(item.id);
+
+          if (!storagePath) {
+            return item;
+          }
+
+          return { ...item, status: failedPaths.has(storagePath) ? "failed" : "done" };
+        })
+      );
       await onUploaded();
     } catch (uploadError) {
-      setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "failed" } : item)));
+      setItems((current) =>
+        current.map((item) => (uploadableIds.has(item.id) && item.status !== "done" ? { ...item, status: "failed" } : item))
+      );
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed.");
     } finally {
       setUploading(false);
@@ -680,6 +745,10 @@ function progressTone(status: UploadItem["status"]) {
     return "bg-info";
   }
 
+  if (status === "processing") {
+    return "bg-info";
+  }
+
   return "bg-warning";
 }
 
@@ -692,6 +761,10 @@ function progressWidth(status: UploadItem["status"]) {
     return "62%";
   }
 
+  if (status === "processing") {
+    return "82%";
+  }
+
   return "20%";
 }
 
@@ -701,6 +774,26 @@ function titleCase(value: string) {
 
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return Array.from(dataTransfer.types).includes("Files");
+}
+
+async function uploadFileToSignedUrl(signedUrl: string, file: File) {
+  const formData = new FormData();
+
+  formData.append("cacheControl", "3600");
+  formData.append("", file);
+
+  const response = await fetch(signedUrl, {
+    method: "PUT",
+    headers: {
+      "x-upsert": "false"
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Storage upload failed.");
+  }
 }
 
 function formatBytes(value: number) {

@@ -50,3 +50,26 @@ export type UploadAssignment = {
   clientId?: string | null;
   originalName: string;
 };
+
+export type UploadIntentFile = {
+  clientUploadId: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+};
+
+export type SignedUploadIntent = UploadIntentFile & {
+  id: string;
+  storagePath: string;
+  signedUrl: string;
+  token: string;
+  path: string;
+};
+
+export type StoredUpload = {
+  clientUploadId: string;
+  id: string;
+  storagePath: string;
+  fileName: string;
+  mimeType: string;
+};

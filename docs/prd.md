@@ -27,7 +27,8 @@ Valid.co editors create realistic AI character base images for ads, but those re
 1. Editor selects or drops one or many character images.
 2. The queue shows each image, status, and remove controls.
 3. Editor uploads.
-4. The system stores images privately, analyzes each image, creates structured attributes, generates embeddings, and marks the image ready.
+4. The browser uploads image bytes directly to private Supabase Storage through signed upload URLs.
+5. The server receives only storage paths, analyzes each image, creates structured attributes, generates embeddings, and marks the image ready.
 
 ### Search
 

@@ -2,7 +2,15 @@ import { env, isGeminiConfigured, isSupabaseConfigured } from "@/lib/env";
 import { analyzeCharacterImage, buildSearchDocument, embedSearchText, toVectorLiteral } from "@/lib/gemini";
 import { addMockCharacter, addMockClient, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import type { CharacterRecord, CharacterStatus, ClientRecord, UploadAssignment } from "@/lib/types";
+import type {
+  CharacterRecord,
+  CharacterStatus,
+  ClientRecord,
+  SignedUploadIntent,
+  StoredUpload,
+  UploadAssignment,
+  UploadIntentFile
+} from "@/lib/types";
 
 type CharacterRow = {
   id: string;
@@ -260,6 +268,155 @@ export async function uploadAndProcessCharacters(input: {
         mime_type: mimeType,
         storage_path: storagePath,
         image_url: await signedImageUrl(storagePath),
+        status: "failed",
+        profile: {
+          summary: "Processing failed.",
+          apparent_age_range: "unknown",
+          gender_presentation: "unknown",
+          wardrobe: [],
+          dominant_colors: [],
+          expression: "unknown",
+          pose: "unknown",
+          shot_type: "unknown",
+          background: "unknown",
+          style: "unknown",
+          quality_notes: message,
+          searchable_phrases: []
+        },
+        search_document: "",
+        error_message: message,
+        created_at: new Date().toISOString()
+      });
+    }
+  }
+
+  return results;
+}
+
+export async function createSignedUploadIntents(files: UploadIntentFile[]): Promise<SignedUploadIntent[]> {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error("Supabase is required for direct uploads.");
+  }
+
+  const validFiles = files.filter((file) => file.mimeType.startsWith("image/"));
+
+  if (!validFiles.length) {
+    throw new Error("No image files received.");
+  }
+
+  const intents: SignedUploadIntent[] = [];
+
+  for (const file of validFiles) {
+    const id = crypto.randomUUID();
+    const storagePath = `unassigned/${id}-${safeFileName(file.fileName)}`;
+    const { data, error } = await supabase.storage.from(env.storageBucket).createSignedUploadUrl(storagePath, {
+      upsert: false
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    intents.push({
+      ...file,
+      id,
+      storagePath,
+      signedUrl: data.signedUrl,
+      token: data.token,
+      path: data.path
+    });
+  }
+
+  return intents;
+}
+
+export async function processStoredUploads(input: { uploads: StoredUpload[] }) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error("Supabase is required for direct uploads.");
+  }
+
+  if (!input.uploads.length) {
+    throw new Error("No uploaded files received.");
+  }
+
+  const results: CharacterRecord[] = [];
+
+  for (const upload of input.uploads) {
+    const mimeType = upload.mimeType || "application/octet-stream";
+    const download = await supabase.storage.from(env.storageBucket).download(upload.storagePath);
+
+    if (download.error) {
+      throw new Error(download.error.message);
+    }
+
+    const buffer = Buffer.from(await download.data.arrayBuffer());
+
+    await supabase.from("characters").insert({
+      id: upload.id,
+      client_id: null,
+      file_name: upload.fileName,
+      mime_type: mimeType,
+      storage_path: upload.storagePath,
+      status: "processing"
+    });
+
+    await supabase.from("processing_events").insert({
+      character_id: upload.id,
+      event_type: "upload_stored",
+      message: "Image uploaded directly to private storage."
+    });
+
+    try {
+      const profile = await analyzeCharacterImage({ buffer, mimeType, fileName: upload.fileName });
+      const searchDocument = buildSearchDocument(profile, "", upload.fileName);
+      const embedding = await embedSearchText(searchDocument, "RETRIEVAL_DOCUMENT");
+
+      const { data, error } = await supabase
+        .from("characters")
+        .update({
+          status: "ready",
+          profile,
+          search_document: searchDocument,
+          embedding: toVectorLiteral(embedding),
+          error_message: null
+        })
+        .eq("id", upload.id)
+        .select("id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,created_at,updated_at")
+        .single();
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      await supabase.from("processing_events").insert({
+        character_id: upload.id,
+        event_type: "analysis_ready",
+        message: "AI profile and embedding generated."
+      });
+
+      results.push(await mapCharacterRow(data as CharacterRow));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown processing error.";
+
+      await supabase.from("characters").update({ status: "failed", error_message: message }).eq("id", upload.id);
+      await supabase.from("processing_events").insert({
+        character_id: upload.id,
+        event_type: "analysis_failed",
+        message
+      });
+
+      results.push({
+        id: upload.id,
+        client_id: null,
+        client_name: "Unassigned",
+        file_name: upload.fileName,
+        mime_type: mimeType,
+        storage_path: upload.storagePath,
+        image_url: await signedImageUrl(upload.storagePath),
         status: "failed",
         profile: {
           summary: "Processing failed.",
