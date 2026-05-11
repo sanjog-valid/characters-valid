@@ -225,6 +225,11 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
+  const uploadableItems = items.filter((item) => item.status !== "done");
+  const completedItems = items.filter((item) => item.status === "done");
+  const uploadSummary = items.length
+    ? `${uploadableItems.length} pending${completedItems.length ? `, ${completedItems.length} complete` : ""}`
+    : "Drop images here when they are ready for analysis.";
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const nextItems = Array.from(files)
@@ -289,17 +294,18 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
   }
 
   async function upload() {
-    if (!items.length || uploading) {
+    if (!uploadableItems.length || uploading) {
       return;
     }
 
+    const uploadableIds = new Set(uploadableItems.map((item) => item.id));
     setUploading(true);
     setError("");
-    setItems((current) => current.map((item) => ({ ...item, status: "uploading" })));
+    setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "uploading" } : item)));
 
     const formData = new FormData();
 
-    items.forEach((item) => {
+    uploadableItems.forEach((item) => {
       formData.append("files", item.file, item.file.name);
     });
 
@@ -314,16 +320,10 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
         throw new Error(payload.error || "Upload failed.");
       }
 
-      setItems((current) => current.map((item) => ({ ...item, status: "done" })));
+      setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "done" } : item)));
       await onUploaded();
-      setTimeout(() => {
-        setItems((current) => {
-          current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
-          return [];
-        });
-      }, 500);
     } catch (uploadError) {
-      setItems((current) => current.map((item) => ({ ...item, status: "failed" })));
+      setItems((current) => current.map((item) => (uploadableIds.has(item.id) ? { ...item, status: "failed" } : item)));
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed.");
     } finally {
       setUploading(false);
@@ -336,14 +336,30 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
         <div>
           <p className="mb-1 text-[11px] font-bold uppercase leading-none text-muted-foreground">Batch Intake</p>
           <CardTitle className="text-lg">Upload character references</CardTitle>
-          <CardDescription>{items.length ? `${items.length} file${items.length === 1 ? "" : "s"} queued` : "Drop images here when they are ready for analysis."}</CardDescription>
+          <CardDescription>{uploadSummary}</CardDescription>
         </div>
 
         <CardAction>
-          <Button type="button" onClick={upload} disabled={!items.length || uploading}>
-            {uploading ? <Loader2 className="spin" /> : <UploadCloud />}
-            Upload
-          </Button>
+          <div className="flex items-center gap-2">
+            {completedItems.length ? (
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  setItems((current) => {
+                    current.filter((item) => item.status === "done").forEach((item) => URL.revokeObjectURL(item.previewUrl));
+                    return current.filter((item) => item.status !== "done");
+                  });
+                }}
+              >
+                Clear completed
+              </Button>
+            ) : null}
+            <Button type="button" onClick={upload} disabled={!uploadableItems.length || uploading}>
+              {uploading ? <Loader2 className="spin" /> : <UploadCloud />}
+              Upload
+            </Button>
+          </div>
         </CardAction>
       </CardHeader>
 
