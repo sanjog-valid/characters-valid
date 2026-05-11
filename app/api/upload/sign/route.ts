@@ -3,6 +3,7 @@ import { createSignedUploadIntents } from "@/lib/character-service";
 import type { UploadIntentFile } from "@/lib/types";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 export async function POST(request: Request) {
   try {

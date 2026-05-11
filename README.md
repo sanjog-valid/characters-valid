@@ -37,9 +37,16 @@ Connect the GitHub repo to Vercel as a standard Next.js project.
 
 - Install command: `npm install`
 - Build command: `npm run build`
-- Output directory: keep the Vercel default
+- Output directory: `.next`
 
-Add the environment variables above in Vercel Project Settings. Do not add `.env.local` to GitHub.
+The repo config already supplies non-secret production values: app name, Supabase URL, storage bucket, and Gemini model names.
+
+Add only these secret values in Vercel Project Settings:
+
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GEMINI_API_KEY`
+
+Do not add `.env.local` to GitHub. Use `/api/health` on the deployed app to verify production runtime config; it returns missing variable names without exposing secret values.
 
 The upload flow is Vercel-safe: `/api/upload/sign` creates short-lived Supabase signed upload URLs, the browser sends image bytes directly to Supabase Storage, and `/api/upload` receives only small JSON metadata to run Gemini analysis and create embeddings.
 

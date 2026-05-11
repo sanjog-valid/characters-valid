@@ -1,4 +1,4 @@
-import { env, isGeminiConfigured } from "@/lib/env";
+import { deploymentConfigError, env, isGeminiConfigured } from "@/lib/env";
 import type { CharacterProfile } from "@/lib/types";
 
 type GeminiPart = {
@@ -8,6 +8,14 @@ type GeminiPart = {
     data: string;
   };
 };
+
+type GeminiFetchOptions = {
+  label: string;
+  url: string;
+  body: unknown;
+};
+
+const retryableStatuses = new Set([429, 500, 502, 503, 504]);
 
 const profileSchema = {
   type: "object",
@@ -91,7 +99,7 @@ export async function analyzeCharacterImage(input: {
   fileName: string;
 }) {
   if (!isGeminiConfigured()) {
-    return createFallbackProfile(input.fileName);
+    throw new Error(deploymentConfigError(["GEMINI_API_KEY"]));
   }
 
   const parts: GeminiPart[] = [
@@ -110,30 +118,18 @@ export async function analyzeCharacterImage(input: {
     }
   ];
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiVisionModel}:generateContent?key=${env.geminiApiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts }],
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: "application/json",
-          responseSchema: profileSchema
-        }
-      })
+  const payload = await fetchGeminiJson({
+    label: "Gemini image analysis",
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiVisionModel}:generateContent?key=${env.geminiApiKey}`,
+    body: {
+      contents: [{ role: "user", parts }],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: "application/json",
+        responseSchema: profileSchema
+      }
     }
-  );
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Gemini image analysis failed: ${response.status} ${message}`);
-  }
-
-  const payload = await response.json();
+  });
   const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!text) {
@@ -148,30 +144,18 @@ export async function embedSearchText(text: string, taskType: "RETRIEVAL_DOCUMEN
     return null;
   }
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiEmbeddingModel}:embedContent?key=${env.geminiApiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
+  const payload = await fetchGeminiJson({
+    label: "Gemini embedding",
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiEmbeddingModel}:embedContent?key=${env.geminiApiKey}`,
+    body: {
+      model: `models/${env.geminiEmbeddingModel}`,
+      content: {
+        parts: [{ text }]
       },
-      body: JSON.stringify({
-        model: `models/${env.geminiEmbeddingModel}`,
-        content: {
-          parts: [{ text }]
-        },
-        taskType,
-        outputDimensionality: env.geminiEmbeddingDimensions
-      })
+      taskType,
+      outputDimensionality: env.geminiEmbeddingDimensions
     }
-  );
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Gemini embedding failed: ${response.status} ${message}`);
-  }
-
-  const payload = await response.json();
+  });
   const values = payload?.embedding?.values;
 
   if (!Array.isArray(values)) {
@@ -212,4 +196,54 @@ function normalizeList(value: unknown) {
   }
 
   return value.map((item) => String(item).trim()).filter(Boolean).slice(0, 12);
+}
+
+async function fetchGeminiJson(options: GeminiFetchOptions) {
+  const maxAttempts = 4;
+  let lastMessage = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(options.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(options.body)
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const message = await response.text();
+      lastMessage = `${response.status} ${message}`;
+
+      if (!retryableStatuses.has(response.status) || attempt === maxAttempts) {
+        throw new Error(`${options.label} failed: ${lastMessage}`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith(`${options.label} failed:`)) {
+        throw error;
+      }
+
+      lastMessage = error instanceof Error ? error.message : "fetch failed";
+
+      if (attempt === maxAttempts || !isRetryableGeminiError(lastMessage)) {
+        throw new Error(`${options.label} failed: ${lastMessage}`);
+      }
+    }
+
+    await sleep(900 * attempt * attempt);
+  }
+
+  throw new Error(`${options.label} failed: ${lastMessage || "unknown error"}`);
+}
+
+function isRetryableGeminiError(message: string) {
+  return /fetch failed|429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED/i.test(message);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,4 +1,4 @@
-import { env, isGeminiConfigured, isSupabaseConfigured } from "@/lib/env";
+import { deploymentConfigError, env, isGeminiConfigured, isSupabaseConfigured, missingSupabaseEnv } from "@/lib/env";
 import { analyzeCharacterImage, buildSearchDocument, embedSearchText, toVectorLiteral } from "@/lib/gemini";
 import { addMockCharacter, addMockClient, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
@@ -297,7 +297,7 @@ export async function createSignedUploadIntents(files: UploadIntentFile[]): Prom
   const supabase = getSupabaseAdmin();
 
   if (!supabase) {
-    throw new Error("Supabase is required for direct uploads.");
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
   }
 
   const validFiles = files.filter((file) => file.mimeType.startsWith("image/"));
@@ -336,7 +336,7 @@ export async function processStoredUploads(input: { uploads: StoredUpload[] }) {
   const supabase = getSupabaseAdmin();
 
   if (!supabase) {
-    throw new Error("Supabase is required for direct uploads.");
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
   }
 
   if (!input.uploads.length) {
