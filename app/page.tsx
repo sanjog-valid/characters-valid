@@ -10,6 +10,7 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  Trash2,
   UploadCloud,
   X
 } from "lucide-react";
@@ -110,6 +111,16 @@ export default function Home() {
 
     return () => window.clearTimeout(handle);
   }, [runSearch]);
+
+  const handleCharacterDeleted = useCallback(
+    (deletedId: string) => {
+      const nextCharacters = characters.filter((character) => character.id !== deletedId);
+
+      setCharacters(nextCharacters);
+      setSelected((current) => (current?.id === deletedId ? nextCharacters[0] || null : current));
+    },
+    [characters]
+  );
 
   return (
     <main className="grid min-h-screen grid-cols-[232px_minmax(0,1fr)] bg-background text-foreground max-lg:grid-cols-1">
@@ -233,7 +244,7 @@ export default function Home() {
               <CharacterGrid characters={characters} selectedId={selected?.id} onSelect={setSelected} loading={loading} />
             </section>
 
-            <CharacterDrawer character={selected} />
+            <CharacterDrawer character={selected} onDeleted={handleCharacterDeleted} />
           </div>
       </section>
     </main>
@@ -643,13 +654,17 @@ function CharacterGrid({
   );
 }
 
-function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
+function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord | null; onDeleted: (id: string) => void }) {
   const profile = character ? safeProfile(character.profile) : null;
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [downloading, setDownloading] = useState(false);
+  const [deleteState, setDeleteState] = useState<"idle" | "confirming" | "deleting">("idle");
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
     setCopyState("idle");
+    setDeleteState("idle");
+    setDeleteError("");
   }, [character?.id]);
 
   if (!character || !profile) {
@@ -706,6 +721,41 @@ function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
     }
   }
 
+  async function deleteReference() {
+    if (!character || deleteState === "deleting") {
+      return;
+    }
+
+    if (deleteState !== "confirming") {
+      setDeleteState("confirming");
+      setDeleteError("");
+      return;
+    }
+
+    setDeleteState("deleting");
+    setDeleteError("");
+
+    try {
+      const response = await fetch("/api/characters", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id: character.id })
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Delete failed.");
+      }
+
+      onDeleted(character.id);
+    } catch (error) {
+      setDeleteState("confirming");
+      setDeleteError(error instanceof Error ? error.message : "Delete failed.");
+    }
+  }
+
   return (
     <Card className="sticky top-[92px] overflow-hidden max-xl:static">
       <div className="relative aspect-[4/4.7] bg-secondary">
@@ -727,7 +777,23 @@ function CharacterDrawer({ character }: { character: CharacterRecord | null }) {
             {copyState === "copied" ? <Check /> : <Copy />}
             {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy reference"}
           </Button>
+          <Button
+            variant={deleteState === "confirming" || deleteState === "deleting" ? "destructive" : "outline"}
+            type="button"
+            onClick={deleteReference}
+            disabled={deleteState === "deleting"}
+          >
+            {deleteState === "deleting" ? <Loader2 className="spin" /> : <Trash2 />}
+            {deleteState === "deleting" ? "Deleting" : deleteState === "confirming" ? "Confirm delete" : "Delete reference"}
+          </Button>
         </div>
+
+        {deleteError ? (
+          <Alert variant="destructive">
+            <AlertCircle className="size-4" />
+            <AlertDescription>{deleteError}</AlertDescription>
+          </Alert>
+        ) : null}
 
         <Table>
           <TableBody>

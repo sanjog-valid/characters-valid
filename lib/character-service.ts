@@ -1,6 +1,6 @@
 import { deploymentConfigError, env, isGeminiConfigured, isSupabaseConfigured, missingSupabaseEnv } from "@/lib/env";
 import { analyzeCharacterImage, buildSearchDocument, embedSearchText, normalizeProfile, toVectorLiteral } from "@/lib/gemini";
-import { addMockCharacter, addMockClient, getMockStore, searchMockCharacters } from "@/lib/mock-store";
+import { addMockCharacter, addMockClient, deleteMockCharacter, getMockStore, searchMockCharacters } from "@/lib/mock-store";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type {
   CharacterProfile,
@@ -33,6 +33,11 @@ type CharacterRow = {
 type CharacterDownloadRow = {
   file_name: string;
   mime_type: string;
+  storage_path: string;
+};
+
+type CharacterDeleteRow = {
+  id: string;
   storage_path: string;
 };
 
@@ -485,6 +490,52 @@ export async function getCharacterDownload(id: string) {
     buffer: Buffer.from(await data.arrayBuffer()),
     fileName: row.file_name,
     mimeType: row.mime_type || "application/octet-stream"
+  };
+}
+
+export async function deleteCharacter(id: string) {
+  const cleanId = id.trim();
+
+  if (!cleanId) {
+    throw new Error("Character id is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    deleteMockCharacter(cleanId);
+    return { id: cleanId, storageDeleted: false };
+  }
+
+  const { data: character, error: characterError } = await supabase
+    .from("characters")
+    .select("id,storage_path")
+    .eq("id", cleanId)
+    .single();
+
+  if (characterError || !character) {
+    throw new Error(characterError?.message || "Reference not found.");
+  }
+
+  const row = character as CharacterDeleteRow;
+
+  const { error: eventsDeleteError } = await supabase.from("processing_events").delete().eq("character_id", cleanId);
+
+  if (eventsDeleteError) {
+    throw new Error(eventsDeleteError.message);
+  }
+
+  const { error: deleteError } = await supabase.from("characters").delete().eq("id", cleanId);
+
+  if (deleteError) {
+    throw new Error(deleteError.message);
+  }
+
+  const storageDelete = row.storage_path ? await supabase.storage.from(env.storageBucket).remove([row.storage_path]) : null;
+
+  return {
+    id: row.id,
+    storageDeleted: !storageDelete?.error
   };
 }
 

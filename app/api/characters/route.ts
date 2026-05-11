@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listCharacters } from "@/lib/character-service";
+import { deleteCharacter, listCharacters } from "@/lib/character-service";
 import type { CharacterStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -12,6 +12,19 @@ export async function GET(request: Request) {
     const characters = await listCharacters({ clientId, status });
 
     return NextResponse.json({ characters });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const payload = await request.json().catch(() => ({}));
+    const id = typeof payload.id === "string" ? payload.id : "";
+    const result = await deleteCharacter(id);
+
+    return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 400 });

@@ -195,6 +195,17 @@ export function addMockCharacter(input: {
   return record;
 }
 
+export function deleteMockCharacter(id: string) {
+  const store = getMockStore();
+  const index = store.characters.findIndex((character) => character.id === id);
+
+  if (index === -1) {
+    throw new Error("Reference not found.");
+  }
+
+  store.characters.splice(index, 1);
+}
+
 export function searchMockCharacters(input: { query?: string; clientId?: string; status?: string }) {
   const store = getMockStore();
   const query = (input.query || "").toLowerCase().trim();
