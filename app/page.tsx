@@ -30,7 +30,7 @@ type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "queued" | "signing" | "uploading" | "uploaded" | "processing" | "done" | "failed";
+  status: "queued" | "signing" | "uploading" | "uploaded" | "failed";
 };
 
 type ViewMode = "library" | "upload";
@@ -201,7 +201,12 @@ export default function Home() {
           className={cn("w-full max-w-[1220px] px-6 py-4 max-sm:px-4", activeView !== "upload" && "hidden")}
           aria-hidden={activeView !== "upload"}
         >
-            <UploadWorkbench onUploaded={runSearch} />
+            <UploadWorkbench
+              onUploaded={async () => {
+                await runSearch();
+                setActiveView("library");
+              }}
+            />
         </section>
 
         <div
@@ -280,10 +285,8 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const uploadableItems = items.filter((item) => item.status === "queued" || item.status === "failed");
-  const completedItems = items.filter((item) => item.status === "done");
-  const processingItems = items.filter((item) => item.status === "processing");
   const uploadSummary = items.length
-    ? `${uploadableItems.length} pending${processingItems.length ? `, ${processingItems.length} processing` : ""}${completedItems.length ? `, ${completedItems.length} complete` : ""}`
+    ? `${uploadableItems.length} pending${items.length - uploadableItems.length ? `, ${items.length - uploadableItems.length} uploading` : ""}`
     : "Drop images here when they are ready for analysis.";
 
   const addFiles = useCallback((files: FileList | File[]) => {
@@ -432,17 +435,18 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
       const uploadedIds = new Set(uploadedIntents.map((intent) => intent.clientUploadId));
 
       setItems((current) =>
-        current.map((item) => {
+        current.filter((item) => {
           if (uploadedIds.has(item.id)) {
-            return { ...item, status: "processing" };
+            URL.revokeObjectURL(item.previewUrl);
+            return false;
           }
 
-          return item;
+          return true;
         })
       );
 
       if (failedUploads.length) {
-        setError(`${failedUploads.length} image${failedUploads.length === 1 ? "" : "s"} failed to upload. The rest are processing.`);
+        setError(`${failedUploads.length} image${failedUploads.length === 1 ? "" : "s"} failed to upload. Uploaded images are in Library.`);
       } else {
         setError("");
       }
@@ -461,7 +465,7 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
     } catch (uploadError) {
       setItems((current) =>
         current.map((item) => {
-          if (!uploadableIds.has(item.id) || item.status === "processing" || item.status === "done") {
+          if (!uploadableIds.has(item.id)) {
             return item;
           }
 
@@ -485,20 +489,6 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
 
         <CardAction>
           <div className="flex items-center gap-2">
-            {completedItems.length ? (
-              <Button
-                variant="outline"
-                type="button"
-                onClick={() => {
-                  setItems((current) => {
-                    current.filter((item) => item.status === "done").forEach((item) => URL.revokeObjectURL(item.previewUrl));
-                    return current.filter((item) => item.status !== "done");
-                  });
-                }}
-              >
-                Clear completed
-              </Button>
-            ) : null}
             <Button type="button" onClick={upload} disabled={!uploadableItems.length || uploading}>
               {uploading ? <Loader2 className="spin" /> : <UploadCloud />}
               Upload
@@ -920,7 +910,7 @@ function safeProfile(profile: Partial<CharacterProfile> | null | undefined): Cha
 }
 
 function statusTone(status: UploadItem["status"] | CharacterRecord["status"]) {
-  if (status === "done" || status === "ready") {
+  if (status === "ready") {
     return "border-success/20 bg-success/10 text-success";
   }
 
@@ -932,15 +922,11 @@ function statusTone(status: UploadItem["status"] | CharacterRecord["status"]) {
 }
 
 function progressTone(status: UploadItem["status"]) {
-  if (status === "done") {
-    return "bg-success";
-  }
-
   if (status === "failed") {
     return "bg-destructive";
   }
 
-  if (status === "uploading" || status === "uploaded" || status === "processing") {
+  if (status === "uploading" || status === "uploaded") {
     return "bg-info";
   }
 
@@ -948,16 +934,12 @@ function progressTone(status: UploadItem["status"]) {
 }
 
 function progressWidth(status: UploadItem["status"]) {
-  if (status === "done" || status === "failed") {
+  if (status === "failed") {
     return "100%";
   }
 
   if (status === "uploading") {
     return "62%";
-  }
-
-  if (status === "processing") {
-    return "82%";
   }
 
   if (status === "uploaded") {
