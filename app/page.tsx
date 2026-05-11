@@ -52,6 +52,7 @@ const ageOptions: Array<{ label: string; value: AgeFilter }> = [
   { label: "50-59", value: "50-59" },
   { label: "60+", value: "60-plus" }
 ];
+const processChunkSize = 2;
 
 export default function Home() {
   const [characters, setCharacters] = useState<CharacterRecord[]>([]);
@@ -80,7 +81,7 @@ export default function Home() {
           age: ageFilter
         })
       });
-      const payload = await response.json();
+      const payload = await readJsonResponse<{ characters?: CharacterRecord[]; error?: string }>(response);
 
       if (!response.ok) {
         throw new Error(payload.error || "Search failed.");
@@ -361,7 +362,7 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
           }))
         })
       });
-      const signPayload = await signResponse.json();
+      const signPayload = await readJsonResponse<{ uploads?: SignedUploadIntent[]; error?: string }>(signResponse);
 
       if (!signResponse.ok) {
         throw new Error(signPayload.error || "Could not prepare uploads.");
@@ -391,42 +392,58 @@ function UploadWorkbench({ onUploaded }: { onUploaded: () => Promise<void> }) {
         throw new Error("Upload failed.");
       }
 
-      const processResponse = await fetch("/api/upload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          uploads: uploadedIntents.map((intent) => ({
-            clientUploadId: intent.clientUploadId,
-            id: intent.id,
-            storagePath: intent.storagePath,
-            fileName: intent.fileName,
-            mimeType: intent.mimeType
-          }))
-        })
-      });
-      const processPayload = await processResponse.json();
+      const processingErrors: string[] = [];
 
-      if (!processResponse.ok) {
-        throw new Error(processPayload.error || "Processing failed.");
-      }
+      for (const chunk of chunkArray(uploadedIntents, processChunkSize)) {
+        const chunkIds = new Set(chunk.map((intent) => intent.clientUploadId));
+        const pathByClientUploadId = new Map(chunk.map((intent) => [intent.clientUploadId, intent.storagePath]));
 
-      const processedCharacters = (processPayload.characters || []) as CharacterRecord[];
-      const failedPaths = new Set(processedCharacters.filter((character) => character.status === "failed").map((character) => character.storage_path));
-      const pathByClientUploadId = new Map(uploadedIntents.map((intent) => [intent.clientUploadId, intent.storagePath]));
+        try {
+          const processResponse = await fetch("/api/upload", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              uploads: chunk.map((intent) => ({
+                clientUploadId: intent.clientUploadId,
+                id: intent.id,
+                storagePath: intent.storagePath,
+                fileName: intent.fileName,
+                mimeType: intent.mimeType
+              }))
+            })
+          });
+          const processPayload = await readJsonResponse<{ characters?: CharacterRecord[]; error?: string }>(processResponse);
 
-      setItems((current) =>
-        current.map((item) => {
-          const storagePath = pathByClientUploadId.get(item.id);
-
-          if (!storagePath) {
-            return item;
+          if (!processResponse.ok) {
+            throw new Error(processPayload.error || "Processing failed.");
           }
 
-          return { ...item, status: failedPaths.has(storagePath) ? "failed" : "done" };
-        })
-      );
+          const processedCharacters = processPayload.characters || [];
+          const failedPaths = new Set(processedCharacters.filter((character) => character.status === "failed").map((character) => character.storage_path));
+
+          setItems((current) =>
+            current.map((item) => {
+              const storagePath = pathByClientUploadId.get(item.id);
+
+              if (!storagePath) {
+                return item;
+              }
+
+              return { ...item, status: failedPaths.has(storagePath) ? "failed" : "done" };
+            })
+          );
+        } catch (processingError) {
+          processingErrors.push(processingError instanceof Error ? processingError.message : "Processing failed.");
+          setItems((current) => current.map((item) => (chunkIds.has(item.id) ? { ...item, status: "failed" } : item)));
+        }
+      }
+
+      if (processingErrors.length) {
+        setError(`Some images failed during analysis: ${processingErrors[0]}`);
+      }
+
       await onUploaded();
     } catch (uploadError) {
       setItems((current) =>
@@ -968,4 +985,39 @@ async function copyText(value: string) {
   } finally {
     textarea.remove();
   }
+}
+
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const text = await response.text();
+
+  if (!text) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const message = cleanServerText(text);
+    throw new Error(message || `Server returned ${response.status} instead of JSON.`);
+  }
+}
+
+function cleanServerText(value: string) {
+  return value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
 }
