@@ -836,6 +836,124 @@ export async function getCharacterSheetDownload(characterId: string) {
   };
 }
 
+export async function enqueueMissingCharacterSheets() {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data: characters, error: charactersError } = await supabase
+    .from("characters")
+    .select("id,file_name,status")
+    .eq("status", "ready")
+    .order("created_at", { ascending: true });
+
+  if (charactersError) {
+    throw new Error(charactersError.message);
+  }
+
+  const readyCharacters = (characters || []) as Array<{ id: string; file_name: string; status: CharacterStatus }>;
+  const characterIds = readyCharacters.map((character) => character.id);
+
+  if (!characterIds.length) {
+    return { queued: 0, skipped: 0, totalReady: 0 };
+  }
+
+  const { data: sheets, error: sheetsError } = await supabase
+    .from("character_sheets")
+    .select(characterSheetSelect)
+    .in("character_id", characterIds);
+
+  if (sheetsError) {
+    throw new Error(sheetsError.message);
+  }
+
+  const sheetsByCharacter = new Map((sheets || []).map((sheet) => [sheet.character_id as string, sheet as CharacterSheetRow]));
+  let queued = 0;
+  let skipped = 0;
+
+  for (const character of readyCharacters) {
+    const existing = sheetsByCharacter.get(character.id);
+
+    if (existing?.status === "ready" || existing?.status === "generating") {
+      skipped += 1;
+      continue;
+    }
+
+    const fileBase = safeFileName(character.file_name.replace(/\.[a-z0-9]+$/i, "")) || "character";
+    const payload = {
+      character_id: character.id,
+      status: "queued",
+      prompt: defaultCharacterSheetPrompt,
+      file_name: `${fileBase}-character-sheet.png`,
+      mime_type: "image/png",
+      generation_model: env.openaiImageModel,
+      generation_size: env.openaiCharacterSheetSize,
+      openai_response_id: null,
+      error_message: null
+    };
+
+    const result = existing
+      ? await supabase.from("character_sheets").update(payload).eq("id", existing.id)
+      : await supabase.from("character_sheets").insert(payload);
+
+    if (result.error) {
+      throw new Error(result.error.message);
+    }
+
+    queued += 1;
+  }
+
+  return {
+    queued,
+    skipped,
+    totalReady: readyCharacters.length
+  };
+}
+
+export async function processQueuedCharacterSheets(input: { limit?: number } = {}) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const limit = Math.max(1, Math.min(Number(input.limit || 1), 2));
+  const { data: queuedRows, error } = await supabase
+    .from("character_sheets")
+    .select(characterSheetSelect)
+    .eq("status", "queued")
+    .order("updated_at", { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const rows = (queuedRows || []) as CharacterSheetRow[];
+  const results: CharacterSheetRecord[] = [];
+
+  for (const row of rows) {
+    results.push(await makeCharacterSheet(row.character_id, row.prompt || defaultCharacterSheetPrompt));
+  }
+
+  const { count: remaining, error: countError } = await supabase
+    .from("character_sheets")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "queued");
+
+  if (countError) {
+    throw new Error(countError.message);
+  }
+
+  return {
+    processed: results.length,
+    remaining: remaining || 0,
+    results
+  };
+}
+
 export async function deleteCharacter(id: string) {
   const cleanId = id.trim();
 
