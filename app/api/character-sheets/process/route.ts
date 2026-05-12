@@ -1,16 +1,25 @@
 import { NextResponse } from "next/server";
-import { processQueuedCharacterSheets } from "@/lib/character-service";
+import { after } from "next/server";
+import { claimQueuedCharacterSheet, finishClaimedCharacterSheet } from "@/lib/character-service";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-export async function POST(request: Request) {
+export async function POST() {
   try {
-    const body = await request.json().catch(() => ({}));
-    const limit = Number.isFinite(Number(body?.limit)) ? Number(body.limit) : 1;
-    const result = await processQueuedCharacterSheets({ limit });
+    const result = await claimQueuedCharacterSheet();
 
-    return NextResponse.json(result);
+    if (result.sheet) {
+      after(async () => {
+        await finishClaimedCharacterSheet(result.sheet!.id);
+      });
+    }
+
+    return NextResponse.json({
+      started: result.sheet ? 1 : 0,
+      remaining: result.remaining,
+      sheet: result.sheet
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Character sheet processing failed.";
     return NextResponse.json({ error: message }, { status: 400 });

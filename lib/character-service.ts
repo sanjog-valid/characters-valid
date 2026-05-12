@@ -735,65 +735,7 @@ export async function makeCharacterSheet(characterId: string, prompt = defaultCh
     fileName: sheetFileName
   });
 
-  try {
-    const source = await supabase.storage.from(env.storageBucket).download(character.storage_path);
-
-    if (source.error) {
-      throw new Error(source.error.message);
-    }
-
-    const sourceBuffer = Buffer.from(await source.data.arrayBuffer());
-    const generated = await generateCharacterSheetImage({
-      buffer: sourceBuffer,
-      mimeType: character.mime_type || "image/png",
-      fileName: character.file_name,
-      prompt
-    });
-    const storagePath = `character-sheets/${cleanId}/${sheetRow.id}.png`;
-    const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, generated.buffer, {
-      contentType: generated.mimeType,
-      upsert: true
-    });
-
-    if (upload.error) {
-      throw new Error(upload.error.message);
-    }
-
-    const { data: readySheet, error: readyError } = await supabase
-      .from("character_sheets")
-      .update({
-        status: "ready",
-        storage_path: storagePath,
-        mime_type: generated.mimeType,
-        generation_model: env.openaiImageModel,
-        generation_size: env.openaiCharacterSheetSize,
-        openai_response_id: null,
-        error_message: null
-      })
-      .eq("id", sheetRow.id)
-      .select(characterSheetSelect)
-      .single();
-
-    if (readyError || !readySheet) {
-      throw new Error(readyError?.message || "Could not save character sheet.");
-    }
-
-    await insertProcessingEvent(cleanId, "character_sheet_ready", "OpenAI 4K character sheet generated.");
-    return mapCharacterSheetRow(readySheet as CharacterSheetRow);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Character sheet generation failed.";
-
-    await supabase
-      .from("character_sheets")
-      .update({
-        status: "failed",
-        error_message: message
-      })
-      .eq("id", sheetRow.id);
-    await insertProcessingEvent(cleanId, "character_sheet_failed", message);
-
-    throw new Error(message);
-  }
+  return generateCharacterSheetForRow(sheetRow);
 }
 
 export async function getCharacterSheetDownload(characterId: string) {
@@ -834,6 +776,84 @@ export async function getCharacterSheetDownload(characterId: string) {
     fileName: row.file_name,
     mimeType: row.mime_type || "image/png"
   };
+}
+
+async function generateCharacterSheetForRow(sheetRow: CharacterSheetRow) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  try {
+    const { data: character, error: characterError } = await supabase
+      .from("characters")
+      .select("id,file_name,mime_type,storage_path,status")
+      .eq("id", sheetRow.character_id)
+      .single();
+
+    if (characterError || !character) {
+      throw new Error(characterError?.message || "Reference not found.");
+    }
+
+    const source = await supabase.storage.from(env.storageBucket).download(character.storage_path);
+
+    if (source.error) {
+      throw new Error(source.error.message);
+    }
+
+    const sourceBuffer = Buffer.from(await source.data.arrayBuffer());
+    const generated = await generateCharacterSheetImage({
+      buffer: sourceBuffer,
+      mimeType: character.mime_type || "image/png",
+      fileName: character.file_name,
+      prompt: sheetRow.prompt || defaultCharacterSheetPrompt
+    });
+    const storagePath = `character-sheets/${character.id}/${sheetRow.id}.png`;
+    const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, generated.buffer, {
+      contentType: generated.mimeType,
+      upsert: true
+    });
+
+    if (upload.error) {
+      throw new Error(upload.error.message);
+    }
+
+    const { data: readySheet, error: readyError } = await supabase
+      .from("character_sheets")
+      .update({
+        status: "ready",
+        storage_path: storagePath,
+        mime_type: generated.mimeType,
+        generation_model: env.openaiImageModel,
+        generation_size: env.openaiCharacterSheetSize,
+        openai_response_id: null,
+        error_message: null
+      })
+      .eq("id", sheetRow.id)
+      .select(characterSheetSelect)
+      .single();
+
+    if (readyError || !readySheet) {
+      throw new Error(readyError?.message || "Could not save character sheet.");
+    }
+
+    await insertProcessingEvent(sheetRow.character_id, "character_sheet_ready", "OpenAI 4K character sheet generated.");
+    return mapCharacterSheetRow(readySheet as CharacterSheetRow);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Character sheet generation failed.";
+
+    await supabase
+      .from("character_sheets")
+      .update({
+        status: "failed",
+        error_message: message
+      })
+      .eq("id", sheetRow.id);
+    await insertProcessingEvent(sheetRow.character_id, "character_sheet_failed", message);
+
+    throw new Error(message);
+  }
 }
 
 export async function enqueueMissingCharacterSheets() {
@@ -952,6 +972,95 @@ export async function processQueuedCharacterSheets(input: { limit?: number } = {
     remaining: remaining || 0,
     results
   };
+}
+
+async function countQueuedCharacterSheets() {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return 0;
+  }
+
+  const { count, error } = await supabase.from("character_sheets").select("id", { count: "exact", head: true }).eq("status", "queued");
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return count || 0;
+}
+
+export async function claimQueuedCharacterSheet() {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data: rows, error } = await supabase
+    .from("character_sheets")
+    .select(characterSheetSelect)
+    .eq("status", "queued")
+    .order("updated_at", { ascending: true })
+    .limit(5);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  for (const row of (rows || []) as CharacterSheetRow[]) {
+    const { data: claimed, error: claimError } = await supabase
+      .from("character_sheets")
+      .update({
+        status: "generating",
+        error_message: null,
+        generation_model: env.openaiImageModel,
+        generation_size: env.openaiCharacterSheetSize
+      })
+      .eq("id", row.id)
+      .eq("status", "queued")
+      .select(characterSheetSelect)
+      .maybeSingle();
+
+    if (claimError) {
+      throw new Error(claimError.message);
+    }
+
+    if (claimed) {
+      const remaining = await countQueuedCharacterSheets();
+
+      return {
+        sheet: await mapCharacterSheetRow(claimed as CharacterSheetRow),
+        remaining
+      };
+    }
+  }
+
+  return {
+    sheet: null,
+    remaining: 0
+  };
+}
+
+export async function finishClaimedCharacterSheet(sheetId: string) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data, error } = await supabase
+    .from("character_sheets")
+    .select(characterSheetSelect)
+    .eq("id", sheetId)
+    .eq("status", "generating")
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "Claimed character sheet not found.");
+  }
+
+  return generateCharacterSheetForRow(data as CharacterSheetRow);
 }
 
 export async function deleteCharacter(id: string) {
