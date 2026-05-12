@@ -92,6 +92,7 @@ const characterSelect =
 const characterSheetSelect =
   "id,character_id,status,prompt,storage_path,file_name,mime_type,generation_model,generation_size,openai_response_id,error_message,created_at,updated_at";
 const maxProcessingAttempts = 5;
+const staleCharacterSheetMs = 90_000;
 
 const defaultCharacterSheetPrompt =
   "From the attached image-Generate a single horizontal image divided into three equal panels showing this exact character with no changes to their face, hair, outfit, skin tone, or physical features. " +
@@ -676,7 +677,16 @@ export async function getCharacterSheet(characterId: string) {
     return null;
   }
 
-  return mapCharacterSheetRow(data as CharacterSheetRow);
+  const row = data as CharacterSheetRow;
+
+  if (isStaleLocalCharacterSheet(row)) {
+    return markCharacterSheetFailed(
+      row,
+      "Character sheet generation timed out on Vercel before OpenAI returned. Retry after the latest deployment enables longer function duration."
+    );
+  }
+
+  return mapCharacterSheetRow(row);
 }
 
 export async function makeCharacterSheet(characterId: string, prompt = defaultCharacterSheetPrompt) {
@@ -712,7 +722,7 @@ export async function makeCharacterSheet(characterId: string, prompt = defaultCh
     return existing;
   }
 
-  if (existing?.status === "generating") {
+  if (existing?.status === "generating" && !isStaleCharacterSheetRecord(existing)) {
     return existing;
   }
 
@@ -966,6 +976,46 @@ async function mapCharacterSheetRow(row: CharacterSheetRow): Promise<CharacterSh
     created_at: row.created_at,
     updated_at: row.updated_at
   };
+}
+
+async function markCharacterSheetFailed(row: CharacterSheetRow, message: string) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return mapCharacterSheetRow(row);
+  }
+
+  const { data, error } = await supabase
+    .from("character_sheets")
+    .update({
+      status: "failed",
+      error_message: message,
+      openai_response_id: null
+    })
+    .eq("id", row.id)
+    .select(characterSheetSelect)
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || message);
+  }
+
+  await insertProcessingEvent(row.character_id, "character_sheet_failed", message);
+  return mapCharacterSheetRow(data as CharacterSheetRow);
+}
+
+function isStaleLocalCharacterSheet(row: CharacterSheetRow) {
+  return row.status === "generating" && !row.openai_response_id && isOlderThan(row.updated_at || row.created_at, staleCharacterSheetMs);
+}
+
+function isStaleCharacterSheetRecord(sheet: CharacterSheetRecord) {
+  return sheet.status === "generating" && !sheet.openai_response_id && isOlderThan(sheet.updated_at || sheet.created_at, staleCharacterSheetMs);
+}
+
+function isOlderThan(value: string | undefined, ageMs: number) {
+  const timestamp = value ? Date.parse(value) : NaN;
+
+  return Number.isFinite(timestamp) && Date.now() - timestamp > ageMs;
 }
 
 async function upsertGeneratingCharacterSheet(input: {
