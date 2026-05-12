@@ -1,4 +1,5 @@
 export type CharacterStatus = "queued" | "processing" | "ready" | "failed";
+export type CharacterSheetStatus = "queued" | "generating" | "ready" | "failed";
 
 export type ClientRecord = {
   id: string;
@@ -39,6 +40,22 @@ export type CharacterRecord = {
   processing_locked_at?: string | null;
   next_process_at?: string | null;
   analysis_provider?: string | null;
+  created_at: string;
+  updated_at?: string;
+};
+
+export type CharacterSheetRecord = {
+  id: string;
+  character_id: string;
+  status: CharacterSheetStatus;
+  prompt: string;
+  storage_path?: string | null;
+  image_url?: string;
+  file_name: string;
+  mime_type: string;
+  generation_model?: string | null;
+  generation_size?: string | null;
+  error_message?: string | null;
   created_at: string;
   updated_at?: string;
 };

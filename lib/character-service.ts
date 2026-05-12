@@ -4,6 +4,7 @@ import {
   buildSearchDocument,
   createFallbackProfile,
   embedSearchText,
+  generateCharacterSheetImage,
   isRetryableAIError,
   normalizeProfile,
   toVectorLiteral
@@ -13,6 +14,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type {
   CharacterProfile,
   CharacterRecord,
+  CharacterSheetRecord,
+  CharacterSheetStatus,
   CharacterStatus,
   ClientRecord,
   FailedStoredUpload,
@@ -54,6 +57,27 @@ type CharacterDeleteRow = {
   storage_path: string;
 };
 
+type CharacterSheetRow = {
+  id: string;
+  character_id: string;
+  status: CharacterSheetStatus;
+  prompt: string;
+  storage_path?: string | null;
+  file_name: string;
+  mime_type: string;
+  generation_model?: string | null;
+  generation_size?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at?: string;
+};
+
+type CharacterSheetDownloadRow = {
+  file_name: string;
+  mime_type: string;
+  storage_path: string;
+};
+
 type ProcessingClaimRow = {
   id: string;
   file_name: string;
@@ -64,7 +88,18 @@ type ProcessingClaimRow = {
 
 const characterSelect =
   "id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,processing_attempts,processing_locked_at,next_process_at,analysis_provider,created_at,updated_at";
+const characterSheetSelect =
+  "id,character_id,status,prompt,storage_path,file_name,mime_type,generation_model,generation_size,error_message,created_at,updated_at";
 const maxProcessingAttempts = 5;
+
+const defaultCharacterSheetPrompt =
+  "From the attached image-Generate a single horizontal image divided into three equal panels showing this exact character with no changes to their face, hair, outfit, skin tone, or physical features. " +
+  "Panel 1 (left): full-body front-facing shot, neutral standing pose, feet visible, slight natural weight shift, looking straight ahead with a relaxed expression. " +
+  "Panel 2 (center): full-body rear-facing shot, exact same outfit and posture, camera directly behind, feet visible. " +
+  "Panel 3 (right): tight close-up of the face only from mid-chest up, slight 3/4 angle, natural expression, same lighting. " +
+  "All three panels share identical background - clean, neutral, softly lit, out-of-focus environment consistent with the source image setting. " +
+  "Consistent warm-neutral studio lighting across all three panels. No text, no labels, no captions, no annotations anywhere in the image. " +
+  "Photorealistic, sharp detail, natural skin texture, same lens feel across all panels. Avoid any change in character identity between panels.";
 
 export async function listClients(): Promise<ClientRecord[]> {
   const supabase = getSupabaseAdmin();
@@ -611,6 +646,180 @@ export async function getCharacterDownload(id: string) {
   };
 }
 
+export async function getCharacterSheet(characterId: string) {
+  const cleanId = characterId.trim();
+
+  if (!cleanId) {
+    throw new Error("Character id is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("character_sheets")
+    .select(characterSheetSelect)
+    .eq("character_id", cleanId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data ? mapCharacterSheetRow(data as CharacterSheetRow) : null;
+}
+
+export async function makeCharacterSheet(characterId: string, prompt = defaultCharacterSheetPrompt) {
+  const cleanId = characterId.trim();
+
+  if (!cleanId) {
+    throw new Error("Character id is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data: character, error: characterError } = await supabase
+    .from("characters")
+    .select("id,file_name,mime_type,storage_path,status")
+    .eq("id", cleanId)
+    .single();
+
+  if (characterError || !character) {
+    throw new Error(characterError?.message || "Reference not found.");
+  }
+
+  if (character.status !== "ready") {
+    throw new Error("Wait until this reference is ready before making a character sheet.");
+  }
+
+  const existing = await getCharacterSheet(cleanId);
+
+  if (existing?.status === "ready") {
+    return existing;
+  }
+
+  if (existing?.status === "generating") {
+    return existing;
+  }
+
+  const fileBase = safeFileName(character.file_name.replace(/\.[a-z0-9]+$/i, "")) || "character";
+  const sheetFileName = `${fileBase}-character-sheet.png`;
+  const sheetRow = await upsertGeneratingCharacterSheet({
+    id: existing?.id,
+    characterId: cleanId,
+    prompt,
+    fileName: sheetFileName
+  });
+
+  try {
+    const source = await supabase.storage.from(env.storageBucket).download(character.storage_path);
+
+    if (source.error) {
+      throw new Error(source.error.message);
+    }
+
+    const sourceBuffer = Buffer.from(await source.data.arrayBuffer());
+    const generated = await generateCharacterSheetImage({
+      buffer: sourceBuffer,
+      mimeType: character.mime_type || "image/png",
+      fileName: character.file_name,
+      prompt
+    });
+    const storagePath = `character-sheets/${cleanId}/${sheetRow.id}.png`;
+    const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, generated.buffer, {
+      contentType: generated.mimeType,
+      upsert: true
+    });
+
+    if (upload.error) {
+      throw new Error(upload.error.message);
+    }
+
+    const { data: readySheet, error: readyError } = await supabase
+      .from("character_sheets")
+      .update({
+        status: "ready",
+        storage_path: storagePath,
+        mime_type: generated.mimeType,
+        generation_model: env.openaiImageModel,
+        generation_size: env.openaiCharacterSheetSize,
+        error_message: null
+      })
+      .eq("id", sheetRow.id)
+      .select(characterSheetSelect)
+      .single();
+
+    if (readyError || !readySheet) {
+      throw new Error(readyError?.message || "Could not save character sheet.");
+    }
+
+    await insertProcessingEvent(cleanId, "character_sheet_ready", "OpenAI character sheet generated.");
+    return mapCharacterSheetRow(readySheet as CharacterSheetRow);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Character sheet generation failed.";
+
+    await supabase
+      .from("character_sheets")
+      .update({
+        status: "failed",
+        error_message: message
+      })
+      .eq("id", sheetRow.id);
+    await insertProcessingEvent(cleanId, "character_sheet_failed", message);
+
+    throw new Error(message);
+  }
+}
+
+export async function getCharacterSheetDownload(characterId: string) {
+  const cleanId = characterId.trim();
+
+  if (!cleanId) {
+    throw new Error("Character id is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  const { data: sheet, error: sheetError } = await supabase
+    .from("character_sheets")
+    .select("file_name,mime_type,storage_path")
+    .eq("character_id", cleanId)
+    .eq("status", "ready")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (sheetError || !sheet) {
+    throw new Error(sheetError?.message || "Character sheet not found.");
+  }
+
+  const row = sheet as CharacterSheetDownloadRow;
+  const { data, error } = await supabase.storage.from(env.storageBucket).download(row.storage_path);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return {
+    buffer: Buffer.from(await data.arrayBuffer()),
+    fileName: row.file_name,
+    mimeType: row.mime_type || "image/png"
+  };
+}
+
 export async function deleteCharacter(id: string) {
   const cleanId = id.trim();
 
@@ -632,6 +841,11 @@ export async function deleteCharacter(id: string) {
   }
 
   const row = character as CharacterDeleteRow;
+  const { data: sheets, error: sheetsError } = await supabase.from("character_sheets").select("storage_path").eq("character_id", cleanId);
+
+  if (sheetsError) {
+    throw new Error(sheetsError.message);
+  }
 
   const { error: eventsDeleteError } = await supabase.from("processing_events").delete().eq("character_id", cleanId);
 
@@ -645,7 +859,11 @@ export async function deleteCharacter(id: string) {
     throw new Error(deleteError.message);
   }
 
-  const storageDelete = row.storage_path ? await supabase.storage.from(env.storageBucket).remove([row.storage_path]) : null;
+  const storagePaths = [
+    row.storage_path,
+    ...((sheets || []) as Array<{ storage_path?: string | null }>).map((sheet) => sheet.storage_path).filter(Boolean)
+  ] as string[];
+  const storageDelete = storagePaths.length ? await supabase.storage.from(env.storageBucket).remove(storagePaths) : null;
 
   return {
     id: row.id,
@@ -723,6 +941,80 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
     created_at: row.created_at,
     updated_at: row.updated_at
   };
+}
+
+async function mapCharacterSheetRow(row: CharacterSheetRow): Promise<CharacterSheetRecord> {
+  return {
+    id: row.id,
+    character_id: row.character_id,
+    status: row.status,
+    prompt: row.prompt,
+    storage_path: row.storage_path,
+    image_url: row.storage_path ? await signedImageUrl(row.storage_path) : "",
+    file_name: row.file_name,
+    mime_type: row.mime_type,
+    generation_model: row.generation_model,
+    generation_size: row.generation_size,
+    error_message: row.error_message,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function upsertGeneratingCharacterSheet(input: {
+  id?: string;
+  characterId: string;
+  prompt: string;
+  fileName: string;
+}) {
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    throw new Error(deploymentConfigError(missingSupabaseEnv()));
+  }
+
+  if (input.id) {
+    const { data, error } = await supabase
+      .from("character_sheets")
+      .update({
+        status: "generating",
+        prompt: input.prompt,
+        file_name: input.fileName,
+        mime_type: "image/png",
+        error_message: null,
+        generation_model: env.openaiImageModel,
+        generation_size: env.openaiCharacterSheetSize
+      })
+      .eq("id", input.id)
+      .select(characterSheetSelect)
+      .single();
+
+    if (error || !data) {
+      throw new Error(error?.message || "Could not start character sheet generation.");
+    }
+
+    return data as CharacterSheetRow;
+  }
+
+  const { data, error } = await supabase
+    .from("character_sheets")
+    .insert({
+      character_id: input.characterId,
+      status: "generating",
+      prompt: input.prompt,
+      file_name: input.fileName,
+      mime_type: "image/png",
+      generation_model: env.openaiImageModel,
+      generation_size: env.openaiCharacterSheetSize
+    })
+    .select(characterSheetSelect)
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "Could not start character sheet generation.");
+  }
+
+  return data as CharacterSheetRow;
 }
 
 function filterLibraryCharacters(

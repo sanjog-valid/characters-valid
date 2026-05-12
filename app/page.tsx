@@ -24,7 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import type { CharacterProfile, CharacterRecord, SignedUploadIntent } from "@/lib/types";
+import type { CharacterProfile, CharacterRecord, CharacterSheetRecord, SignedUploadIntent } from "@/lib/types";
 
 type UploadItem = {
   id: string;
@@ -218,8 +218,8 @@ export default function Home() {
           )}
           aria-hidden={activeView !== "library"}
         >
-            <section className="grid min-h-0 min-w-0 gap-5 overflow-y-auto pr-1 max-xl:overflow-visible max-xl:pr-0">
-              <div className="grid grid-cols-[minmax(280px,1fr)_140px_112px] gap-2 max-md:grid-cols-1">
+            <section className="grid min-h-0 min-w-0 content-start gap-4 overflow-y-auto pr-1 max-xl:overflow-visible max-xl:pr-0">
+              <div className="grid grid-cols-[minmax(280px,1fr)_140px_112px] items-center gap-2 max-md:grid-cols-1">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -621,14 +621,23 @@ function CharacterGrid({
 }) {
   if (loading) {
     return (
-      <Card className="grid min-h-[220px] gap-3 p-4">
-        <Skeleton className="h-5 w-44" />
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-3">
-          <Skeleton className="aspect-[4/5] rounded-lg" />
-          <Skeleton className="aspect-[4/5] rounded-lg" />
-          <Skeleton className="aspect-[4/5] rounded-lg" />
-        </div>
-      </Card>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-3 max-sm:grid-cols-1">
+        {Array.from({ length: 8 }).map((_, index) => (
+          <Card className="h-[424px] overflow-hidden rounded-lg p-0 shadow-xs max-sm:h-auto" key={index}>
+            <Skeleton className="h-[255px] rounded-none" />
+            <div className="grid gap-2 pb-4 pl-3 pr-4 pt-3">
+              <Skeleton className="h-4 w-[88%]" />
+              <Skeleton className="h-4 w-[68%]" />
+              <Skeleton className="h-3 w-[72%]" />
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <Skeleton className="h-5 w-14 rounded-full" />
+                <Skeleton className="h-5 w-24 rounded-full" />
+                <Skeleton className="h-5 w-20 rounded-full" />
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
     );
   }
 
@@ -707,6 +716,11 @@ function CharacterGrid({
 
 function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord | null; onDeleted: (id: string) => void }) {
   const profile = character ? safeProfile(character.profile) : null;
+  const [sheet, setSheet] = useState<CharacterSheetRecord | null>(null);
+  const [sheetLoading, setSheetLoading] = useState(false);
+  const [sheetAction, setSheetAction] = useState(false);
+  const [sheetDownloading, setSheetDownloading] = useState(false);
+  const [sheetError, setSheetError] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [downloading, setDownloading] = useState(false);
   const [deleteState, setDeleteState] = useState<"idle" | "confirming" | "deleting">("idle");
@@ -716,7 +730,72 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
     setCopyState("idle");
     setDeleteState("idle");
     setDeleteError("");
+    setSheet(null);
+    setSheetError("");
+    setSheetAction(false);
+    setSheetDownloading(false);
   }, [character?.id]);
+
+  useEffect(() => {
+    if (!character?.id) {
+      return;
+    }
+
+    let cancelled = false;
+    const characterId = character.id;
+
+    async function loadSheet() {
+      setSheetLoading(true);
+
+      try {
+        const response = await fetch(`/api/character-sheets?characterId=${encodeURIComponent(characterId)}`);
+        const payload = await readJsonResponse<{ sheet?: CharacterSheetRecord | null; error?: string }>(response);
+
+        if (!response.ok) {
+          throw new Error(payload.error || "Could not load character sheet.");
+        }
+
+        if (!cancelled) {
+          setSheet(payload.sheet || null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSheetError(error instanceof Error ? error.message : "Could not load character sheet.");
+        }
+      } finally {
+        if (!cancelled) {
+          setSheetLoading(false);
+        }
+      }
+    }
+
+    void loadSheet();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [character?.id]);
+
+  useEffect(() => {
+    if (!character?.id || sheet?.status !== "generating") {
+      return;
+    }
+
+    const handle = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/character-sheets?characterId=${encodeURIComponent(character.id)}`);
+        const payload = await readJsonResponse<{ sheet?: CharacterSheetRecord | null }>(response);
+
+        if (response.ok) {
+          setSheet(payload.sheet || null);
+        }
+      } catch {
+        // Manual refresh or the next poll can recover this transient state.
+      }
+    }, 6000);
+
+    return () => window.clearInterval(handle);
+  }, [character?.id, sheet?.status]);
 
   if (!character || !profile) {
     return (
@@ -754,6 +833,51 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
       await downloadCharacterReference(character);
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function makeOrDownloadCharacterSheet() {
+    if (!character || sheetAction || sheetDownloading) {
+      return;
+    }
+
+    if (sheet?.status === "ready") {
+      setSheetDownloading(true);
+      setSheetError("");
+
+      try {
+        await downloadCharacterSheet(character, sheet);
+      } catch (error) {
+        setSheetError(error instanceof Error ? error.message : "Character sheet download failed.");
+      } finally {
+        setSheetDownloading(false);
+      }
+
+      return;
+    }
+
+    setSheetAction(true);
+    setSheetError("");
+
+    try {
+      const response = await fetch("/api/character-sheets", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ characterId: character.id })
+      });
+      const payload = await readJsonResponse<{ sheet?: CharacterSheetRecord; error?: string }>(response);
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Character sheet generation failed.");
+      }
+
+      setSheet(payload.sheet || null);
+    } catch (error) {
+      setSheetError(error instanceof Error ? error.message : "Character sheet generation failed.");
+    } finally {
+      setSheetAction(false);
     }
   }
 
@@ -804,6 +928,17 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
           fetchPriority="high"
         />
       </div>
+      {sheet?.status === "ready" && sheet.image_url ? (
+        <div className="border-t bg-secondary/50 p-2">
+          <img
+            className="aspect-video w-full rounded-md border bg-background object-contain"
+            src={sheet.image_url}
+            alt={`${profile.summary} character sheet`}
+            loading="eager"
+            decoding="async"
+          />
+        </div>
+      ) : null}
 
       <CardHeader className="gap-1.5 p-4">
         {character.status !== "ready" ? (
@@ -821,6 +956,16 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
           <Button className="h-8 px-2.5 text-xs" variant="outline" type="button" onClick={downloadReference} disabled={downloading}>
             {downloading ? <Loader2 className="spin" /> : <Download />}
             {downloading ? "Downloading" : "Download"}
+          </Button>
+          <Button
+            className="h-8 px-2.5 text-xs"
+            variant={sheet?.status === "ready" ? "outline" : "secondary"}
+            type="button"
+            onClick={makeOrDownloadCharacterSheet}
+            disabled={character.status !== "ready" || sheetLoading || sheetAction || sheetDownloading || sheet?.status === "generating"}
+          >
+            {sheetAction || sheetDownloading || sheet?.status === "generating" ? <Loader2 className="spin" /> : sheet?.status === "ready" ? <Download /> : <ImagePlus />}
+            {characterSheetButtonLabel({ sheet, sheetLoading, sheetAction, sheetDownloading })}
           </Button>
           <Button className="h-8 px-2.5 text-xs" variant="outline" type="button" onClick={copyReferenceImage}>
             {copyState === "copied" ? <Check /> : <Copy />}
@@ -842,6 +987,13 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
           <Alert variant="destructive">
             <AlertCircle className="size-4" />
             <AlertDescription>{deleteError}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        {sheetError ? (
+          <Alert variant="destructive">
+            <AlertCircle className="size-4" />
+            <AlertDescription>{sheetError}</AlertDescription>
           </Alert>
         ) : null}
 
@@ -982,6 +1134,35 @@ function libraryStatusLabel(character: CharacterRecord) {
   return "Ready";
 }
 
+function characterSheetButtonLabel(input: {
+  sheet: CharacterSheetRecord | null;
+  sheetLoading: boolean;
+  sheetAction: boolean;
+  sheetDownloading: boolean;
+}) {
+  if (input.sheetDownloading) {
+    return "Downloading sheet";
+  }
+
+  if (input.sheetAction || input.sheet?.status === "generating") {
+    return "Making sheet";
+  }
+
+  if (input.sheetLoading) {
+    return "Checking sheet";
+  }
+
+  if (input.sheet?.status === "ready") {
+    return "Download character sheet";
+  }
+
+  if (input.sheet?.status === "failed") {
+    return "Retry character sheet";
+  }
+
+  return "Make character sheet";
+}
+
 function hasDraggedFiles(dataTransfer: DataTransfer) {
   return Array.from(dataTransfer.types).includes("Files");
 }
@@ -1027,6 +1208,25 @@ async function downloadCharacterReference(character: CharacterRecord) {
 
   link.href = objectUrl;
   link.download = character.file_name || "character-reference";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function downloadCharacterSheet(character: CharacterRecord, sheet: CharacterSheetRecord) {
+  const response = await fetch(`/api/character-sheets/download?characterId=${encodeURIComponent(character.id)}`);
+
+  if (!response.ok) {
+    throw new Error("Character sheet download failed.");
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download = sheet.file_name || `${character.file_name.replace(/\.[a-z0-9]+$/i, "")}-character-sheet.png`;
   document.body.appendChild(link);
   link.click();
   link.remove();
