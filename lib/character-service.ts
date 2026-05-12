@@ -4,10 +4,9 @@ import {
   buildSearchDocument,
   createFallbackProfile,
   embedSearchText,
+  generateCharacterSheetImage,
   isRetryableAIError,
   normalizeProfile,
-  retrieveCharacterSheetGeneration,
-  startCharacterSheetGeneration,
   toVectorLiteral
 } from "@/lib/openai";
 import { addMockCharacter, addMockClient, deleteMockCharacter, getMockStore, searchMockCharacters } from "@/lib/mock-store";
@@ -677,7 +676,7 @@ export async function getCharacterSheet(characterId: string) {
     return null;
   }
 
-  return pollAndFinalizeCharacterSheet(data as CharacterSheetRow);
+  return mapCharacterSheetRow(data as CharacterSheetRow);
 }
 
 export async function makeCharacterSheet(characterId: string, prompt = defaultCharacterSheetPrompt) {
@@ -734,30 +733,43 @@ export async function makeCharacterSheet(characterId: string, prompt = defaultCh
     }
 
     const sourceBuffer = Buffer.from(await source.data.arrayBuffer());
-    const generation = await startCharacterSheetGeneration({
+    const generated = await generateCharacterSheetImage({
       buffer: sourceBuffer,
       mimeType: character.mime_type || "image/png",
+      fileName: character.file_name,
       prompt
     });
-    const { data: generatingSheet, error: generatingError } = await supabase
+    const storagePath = `character-sheets/${cleanId}/${sheetRow.id}.png`;
+    const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, generated.buffer, {
+      contentType: generated.mimeType,
+      upsert: true
+    });
+
+    if (upload.error) {
+      throw new Error(upload.error.message);
+    }
+
+    const { data: readySheet, error: readyError } = await supabase
       .from("character_sheets")
       .update({
-        status: "generating",
-        openai_response_id: generation.responseId,
-        generation_model: env.openaiImageResponseModel,
+        status: "ready",
+        storage_path: storagePath,
+        mime_type: generated.mimeType,
+        generation_model: env.openaiImageModel,
         generation_size: env.openaiCharacterSheetSize,
+        openai_response_id: null,
         error_message: null
       })
       .eq("id", sheetRow.id)
       .select(characterSheetSelect)
       .single();
 
-    if (generatingError || !generatingSheet) {
-      throw new Error(generatingError?.message || "Could not save character sheet generation.");
+    if (readyError || !readySheet) {
+      throw new Error(readyError?.message || "Could not save character sheet.");
     }
 
-    await insertProcessingEvent(cleanId, "character_sheet_started", "OpenAI background character sheet generation started.");
-    return mapCharacterSheetRow(generatingSheet as CharacterSheetRow);
+    await insertProcessingEvent(cleanId, "character_sheet_ready", "OpenAI 4K character sheet generated.");
+    return mapCharacterSheetRow(readySheet as CharacterSheetRow);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Character sheet generation failed.";
 
@@ -956,75 +968,6 @@ async function mapCharacterSheetRow(row: CharacterSheetRow): Promise<CharacterSh
   };
 }
 
-async function pollAndFinalizeCharacterSheet(row: CharacterSheetRow): Promise<CharacterSheetRecord> {
-  if (row.status !== "generating" || !row.openai_response_id) {
-    return mapCharacterSheetRow(row);
-  }
-
-  const supabase = getSupabaseAdmin();
-
-  if (!supabase) {
-    return mapCharacterSheetRow(row);
-  }
-
-  const response = await retrieveCharacterSheetGeneration(row.openai_response_id);
-
-  if (response.status === "queued" || response.status === "in_progress") {
-    return mapCharacterSheetRow(row);
-  }
-
-  if (response.status !== "completed" || !response.image) {
-    const message = response.error || `OpenAI generation ended with status: ${response.status}`;
-    const { data, error } = await supabase
-      .from("character_sheets")
-      .update({
-        status: "failed",
-        error_message: message
-      })
-      .eq("id", row.id)
-      .select(characterSheetSelect)
-      .single();
-
-    if (error || !data) {
-      throw new Error(error?.message || message);
-    }
-
-    await insertProcessingEvent(row.character_id, "character_sheet_failed", message);
-    return mapCharacterSheetRow(data as CharacterSheetRow);
-  }
-
-  const storagePath = `character-sheets/${row.character_id}/${row.id}.png`;
-  const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, response.image.buffer, {
-    contentType: response.image.mimeType,
-    upsert: true
-  });
-
-  if (upload.error) {
-    throw new Error(upload.error.message);
-  }
-
-  const { data, error } = await supabase
-    .from("character_sheets")
-    .update({
-      status: "ready",
-      storage_path: storagePath,
-      mime_type: response.image.mimeType,
-      generation_model: env.openaiImageResponseModel,
-      generation_size: env.openaiCharacterSheetSize,
-      error_message: null
-    })
-    .eq("id", row.id)
-    .select(characterSheetSelect)
-    .single();
-
-  if (error || !data) {
-    throw new Error(error?.message || "Could not save completed character sheet.");
-  }
-
-  await insertProcessingEvent(row.character_id, "character_sheet_ready", "OpenAI background character sheet generated.");
-  return mapCharacterSheetRow(data as CharacterSheetRow);
-}
-
 async function upsertGeneratingCharacterSheet(input: {
   id?: string;
   characterId: string;
@@ -1047,7 +990,7 @@ async function upsertGeneratingCharacterSheet(input: {
         mime_type: "image/png",
         openai_response_id: null,
         error_message: null,
-        generation_model: env.openaiImageResponseModel,
+        generation_model: env.openaiImageModel,
         generation_size: env.openaiCharacterSheetSize
       })
       .eq("id", input.id)
@@ -1069,7 +1012,7 @@ async function upsertGeneratingCharacterSheet(input: {
       prompt: input.prompt,
       file_name: input.fileName,
       mime_type: "image/png",
-      generation_model: env.openaiImageResponseModel,
+      generation_model: env.openaiImageModel,
       generation_size: env.openaiCharacterSheetSize
     })
     .select(characterSheetSelect)

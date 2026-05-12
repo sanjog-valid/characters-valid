@@ -170,55 +170,40 @@ export async function embedSearchText(text: string) {
   return values as number[];
 }
 
-export async function startCharacterSheetGeneration(input: {
+export async function generateCharacterSheetImage(input: {
   buffer: Buffer;
   mimeType: string;
+  fileName: string;
   prompt: string;
 }) {
   if (!isOpenAIConfigured()) {
     throw new Error(deploymentConfigError(["OPENAI_API_KEY"]));
   }
 
-  const payload = await fetchOpenAIJson({
-    label: "OpenAI character sheet generation",
-    url: "https://api.openai.com/v1/responses",
-    body: {
-      model: env.openaiImageResponseModel,
-      background: true,
-      store: true,
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: input.prompt
-            },
-            {
-              type: "input_image",
-              image_url: `data:${input.mimeType || "image/png"};base64,${input.buffer.toString("base64")}`
-            }
-          ]
-        }
-      ],
-      tools: [
-        {
-          type: "image_generation",
-          size: env.openaiCharacterSheetSize,
-          quality: env.openaiCharacterSheetQuality
-        }
-      ]
-    }
-  });
+  const form = new FormData();
+  const imageBlob = new Blob([new Uint8Array(input.buffer)], { type: input.mimeType || "application/octet-stream" });
 
-  if (typeof payload?.id !== "string") {
-    throw new Error("OpenAI did not return a background response id.");
+  form.set("model", env.openaiImageModel);
+  form.set("prompt", input.prompt);
+  form.set("size", env.openaiCharacterSheetSize);
+  form.set("quality", env.openaiCharacterSheetQuality);
+  form.append("image[]", imageBlob, input.fileName || "character-reference.png");
+
+  const payload = await fetchOpenAIForm({
+    label: "OpenAI character sheet generation",
+    url: "https://api.openai.com/v1/images/edits",
+    body: form
+  });
+  const image = Array.isArray(payload?.data) ? payload.data[0] : null;
+
+  if (typeof image?.b64_json === "string") {
+    return {
+      buffer: Buffer.from(image.b64_json, "base64"),
+      mimeType: "image/png"
+    };
   }
 
-  return {
-    responseId: payload.id,
-    status: typeof payload.status === "string" ? payload.status : "queued"
-  };
+  throw new Error("OpenAI character sheet generation returned no image.");
 }
 
 export async function retrieveCharacterSheetGeneration(responseId: string) {
@@ -326,6 +311,52 @@ async function fetchOpenAIJson(options: OpenAIFetchOptions) {
     }
 
     await sleep(900 * attempt * attempt);
+  }
+
+  throw new RetryableAIError(`${options.label} failed: ${lastMessage || "unknown error"}`);
+}
+
+async function fetchOpenAIForm(options: { label: string; url: string; body: FormData }) {
+  const maxAttempts = 2;
+  let lastMessage = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(options.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.openaiApiKey}`
+        },
+        body: options.body
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const message = await response.text();
+      lastMessage = `${response.status} ${message}`;
+
+      if (!retryableStatuses.has(response.status) || attempt === maxAttempts) {
+        throw new Error(`${options.label} failed: ${lastMessage}`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith(`${options.label} failed:`)) {
+        if (isRetryableAIError(error)) {
+          throw new RetryableAIError(error.message);
+        }
+
+        throw error;
+      }
+
+      lastMessage = error instanceof Error ? error.message : "fetch failed";
+
+      if (attempt === maxAttempts || !isRetryableAIError(lastMessage)) {
+        throw new Error(`${options.label} failed: ${lastMessage}`);
+      }
+    }
+
+    await sleep(1200 * attempt);
   }
 
   throw new RetryableAIError(`${options.label} failed: ${lastMessage || "unknown error"}`);
