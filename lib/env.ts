@@ -15,6 +15,7 @@ export const env = {
   openaiEmbeddingModel: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
   openaiEmbeddingDimensions: Number(process.env.OPENAI_EMBEDDING_DIMENSIONS || 768),
   openaiImageModel: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+  openaiImageResponseModel: process.env.OPENAI_IMAGE_RESPONSE_MODEL || "gpt-5-mini",
   openaiCharacterSheetSize: process.env.OPENAI_CHARACTER_SHEET_SIZE || "3840x2160",
   openaiCharacterSheetQuality: process.env.OPENAI_CHARACTER_SHEET_QUALITY || "high",
   processorSecret: process.env.PROCESSOR_SECRET || "",
@@ -62,6 +63,7 @@ export function getRuntimeEnvStatus() {
       openaiVisionModel: Boolean(env.openaiVisionModel),
       openaiEmbeddingModel: Boolean(env.openaiEmbeddingModel),
       openaiImageModel: Boolean(env.openaiImageModel),
+      openaiImageResponseModel: Boolean(env.openaiImageResponseModel),
       processorSecret: Boolean(env.processorSecret),
       cronSecret: Boolean(env.cronSecret)
     },

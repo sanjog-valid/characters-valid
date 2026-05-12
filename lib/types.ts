@@ -55,6 +55,7 @@ export type CharacterSheetRecord = {
   mime_type: string;
   generation_model?: string | null;
   generation_size?: string | null;
+  openai_response_id?: string | null;
   error_message?: string | null;
   created_at: string;
   updated_at?: string;

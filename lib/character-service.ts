@@ -4,9 +4,10 @@ import {
   buildSearchDocument,
   createFallbackProfile,
   embedSearchText,
-  generateCharacterSheetImage,
   isRetryableAIError,
   normalizeProfile,
+  retrieveCharacterSheetGeneration,
+  startCharacterSheetGeneration,
   toVectorLiteral
 } from "@/lib/openai";
 import { addMockCharacter, addMockClient, deleteMockCharacter, getMockStore, searchMockCharacters } from "@/lib/mock-store";
@@ -67,6 +68,7 @@ type CharacterSheetRow = {
   mime_type: string;
   generation_model?: string | null;
   generation_size?: string | null;
+  openai_response_id?: string | null;
   error_message?: string | null;
   created_at: string;
   updated_at?: string;
@@ -89,7 +91,7 @@ type ProcessingClaimRow = {
 const characterSelect =
   "id,client_id,clients(name),file_name,mime_type,storage_path,status,profile,search_document,error_message,processing_attempts,processing_locked_at,next_process_at,analysis_provider,created_at,updated_at";
 const characterSheetSelect =
-  "id,character_id,status,prompt,storage_path,file_name,mime_type,generation_model,generation_size,error_message,created_at,updated_at";
+  "id,character_id,status,prompt,storage_path,file_name,mime_type,generation_model,generation_size,openai_response_id,error_message,created_at,updated_at";
 const maxProcessingAttempts = 5;
 
 const defaultCharacterSheetPrompt =
@@ -671,7 +673,11 @@ export async function getCharacterSheet(characterId: string) {
     throw new Error(error.message);
   }
 
-  return data ? mapCharacterSheetRow(data as CharacterSheetRow) : null;
+  if (!data) {
+    return null;
+  }
+
+  return pollAndFinalizeCharacterSheet(data as CharacterSheetRow);
 }
 
 export async function makeCharacterSheet(characterId: string, prompt = defaultCharacterSheetPrompt) {
@@ -728,29 +734,17 @@ export async function makeCharacterSheet(characterId: string, prompt = defaultCh
     }
 
     const sourceBuffer = Buffer.from(await source.data.arrayBuffer());
-    const generated = await generateCharacterSheetImage({
+    const generation = await startCharacterSheetGeneration({
       buffer: sourceBuffer,
       mimeType: character.mime_type || "image/png",
-      fileName: character.file_name,
       prompt
     });
-    const storagePath = `character-sheets/${cleanId}/${sheetRow.id}.png`;
-    const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, generated.buffer, {
-      contentType: generated.mimeType,
-      upsert: true
-    });
-
-    if (upload.error) {
-      throw new Error(upload.error.message);
-    }
-
-    const { data: readySheet, error: readyError } = await supabase
+    const { data: generatingSheet, error: generatingError } = await supabase
       .from("character_sheets")
       .update({
-        status: "ready",
-        storage_path: storagePath,
-        mime_type: generated.mimeType,
-        generation_model: env.openaiImageModel,
+        status: "generating",
+        openai_response_id: generation.responseId,
+        generation_model: env.openaiImageResponseModel,
         generation_size: env.openaiCharacterSheetSize,
         error_message: null
       })
@@ -758,12 +752,12 @@ export async function makeCharacterSheet(characterId: string, prompt = defaultCh
       .select(characterSheetSelect)
       .single();
 
-    if (readyError || !readySheet) {
-      throw new Error(readyError?.message || "Could not save character sheet.");
+    if (generatingError || !generatingSheet) {
+      throw new Error(generatingError?.message || "Could not save character sheet generation.");
     }
 
-    await insertProcessingEvent(cleanId, "character_sheet_ready", "OpenAI character sheet generated.");
-    return mapCharacterSheetRow(readySheet as CharacterSheetRow);
+    await insertProcessingEvent(cleanId, "character_sheet_started", "OpenAI background character sheet generation started.");
+    return mapCharacterSheetRow(generatingSheet as CharacterSheetRow);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Character sheet generation failed.";
 
@@ -955,10 +949,80 @@ async function mapCharacterSheetRow(row: CharacterSheetRow): Promise<CharacterSh
     mime_type: row.mime_type,
     generation_model: row.generation_model,
     generation_size: row.generation_size,
+    openai_response_id: row.openai_response_id,
     error_message: row.error_message,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
+}
+
+async function pollAndFinalizeCharacterSheet(row: CharacterSheetRow): Promise<CharacterSheetRecord> {
+  if (row.status !== "generating" || !row.openai_response_id) {
+    return mapCharacterSheetRow(row);
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  if (!supabase) {
+    return mapCharacterSheetRow(row);
+  }
+
+  const response = await retrieveCharacterSheetGeneration(row.openai_response_id);
+
+  if (response.status === "queued" || response.status === "in_progress") {
+    return mapCharacterSheetRow(row);
+  }
+
+  if (response.status !== "completed" || !response.image) {
+    const message = response.error || `OpenAI generation ended with status: ${response.status}`;
+    const { data, error } = await supabase
+      .from("character_sheets")
+      .update({
+        status: "failed",
+        error_message: message
+      })
+      .eq("id", row.id)
+      .select(characterSheetSelect)
+      .single();
+
+    if (error || !data) {
+      throw new Error(error?.message || message);
+    }
+
+    await insertProcessingEvent(row.character_id, "character_sheet_failed", message);
+    return mapCharacterSheetRow(data as CharacterSheetRow);
+  }
+
+  const storagePath = `character-sheets/${row.character_id}/${row.id}.png`;
+  const upload = await supabase.storage.from(env.storageBucket).upload(storagePath, response.image.buffer, {
+    contentType: response.image.mimeType,
+    upsert: true
+  });
+
+  if (upload.error) {
+    throw new Error(upload.error.message);
+  }
+
+  const { data, error } = await supabase
+    .from("character_sheets")
+    .update({
+      status: "ready",
+      storage_path: storagePath,
+      mime_type: response.image.mimeType,
+      generation_model: env.openaiImageResponseModel,
+      generation_size: env.openaiCharacterSheetSize,
+      error_message: null
+    })
+    .eq("id", row.id)
+    .select(characterSheetSelect)
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "Could not save completed character sheet.");
+  }
+
+  await insertProcessingEvent(row.character_id, "character_sheet_ready", "OpenAI background character sheet generated.");
+  return mapCharacterSheetRow(data as CharacterSheetRow);
 }
 
 async function upsertGeneratingCharacterSheet(input: {
@@ -981,8 +1045,9 @@ async function upsertGeneratingCharacterSheet(input: {
         prompt: input.prompt,
         file_name: input.fileName,
         mime_type: "image/png",
+        openai_response_id: null,
         error_message: null,
-        generation_model: env.openaiImageModel,
+        generation_model: env.openaiImageResponseModel,
         generation_size: env.openaiCharacterSheetSize
       })
       .eq("id", input.id)
@@ -1004,7 +1069,7 @@ async function upsertGeneratingCharacterSheet(input: {
       prompt: input.prompt,
       file_name: input.fileName,
       mime_type: "image/png",
-      generation_model: env.openaiImageModel,
+      generation_model: env.openaiImageResponseModel,
       generation_size: env.openaiCharacterSheetSize
     })
     .select(characterSheetSelect)
