@@ -650,6 +650,7 @@ function CharacterGrid({
       {characters.map((character, index) => {
         const profile = safeProfile(character.profile);
         const isReady = character.status === "ready";
+        const imageUrl = character.preview_url || character.image_url;
 
         return (
           <article
@@ -663,7 +664,7 @@ function CharacterGrid({
               <div className="relative h-[255px] overflow-hidden bg-secondary max-sm:aspect-[4/5] max-sm:h-auto">
                 <img
                   className="size-full scale-[1.035] object-cover"
-                  src={character.image_url}
+                  src={imageUrl}
                   alt={profile.summary || character.file_name}
                   loading={index < 12 ? "eager" : "lazy"}
                   decoding="async"
@@ -921,7 +922,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
       <div className="relative flex max-h-[250px] items-center justify-center bg-secondary p-2">
         <img
           className="max-h-[234px] w-full object-contain"
-          src={character.image_url}
+          src={character.preview_url || character.image_url}
           alt={profile.summary}
           loading="eager"
           decoding="async"
@@ -932,7 +933,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
         <div className="border-t bg-secondary/50 p-2">
           <img
             className="aspect-video w-full rounded-md border bg-background object-contain"
-            src={sheet.image_url}
+            src={sheet.preview_url || sheet.image_url}
             alt={`${profile.summary} character sheet`}
             loading="eager"
             decoding="async"

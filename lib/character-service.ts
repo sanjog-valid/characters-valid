@@ -1163,6 +1163,7 @@ async function claimProcessingCharacters(workerId: string, limit: number): Promi
 
 async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
   const clientRelation = Array.isArray(row.clients) ? row.clients[0] : row.clients;
+  const previewUrl = (await signedImageUrl(row.storage_path, { width: 520, height: 680, resize: "cover", quality: 72 })) || (await signedImageUrl(row.storage_path));
 
   return {
     id: row.id,
@@ -1171,7 +1172,8 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
     file_name: row.file_name,
     mime_type: row.mime_type,
     storage_path: row.storage_path,
-    image_url: await signedImageUrl(row.storage_path),
+    image_url: previewUrl,
+    preview_url: previewUrl,
     status: row.status,
     profile: normalizeProfile(row.profile),
     search_document: row.search_document,
@@ -1187,13 +1189,16 @@ async function mapCharacterRow(row: CharacterRow): Promise<CharacterRecord> {
 }
 
 async function mapCharacterSheetRow(row: CharacterSheetRow): Promise<CharacterSheetRecord> {
+  const previewUrl = row.storage_path ? (await signedImageUrl(row.storage_path, { width: 1280, height: 720, resize: "contain", quality: 72 })) || (await signedImageUrl(row.storage_path)) : "";
+
   return {
     id: row.id,
     character_id: row.character_id,
     status: row.status,
     prompt: row.prompt,
     storage_path: row.storage_path,
-    image_url: row.storage_path ? await signedImageUrl(row.storage_path) : "",
+    image_url: previewUrl,
+    preview_url: previewUrl,
     file_name: row.file_name,
     mime_type: row.mime_type,
     generation_model: row.generation_model,
@@ -1403,16 +1408,28 @@ function parseAgeRange(value: string) {
   };
 }
 
-async function signedImageUrl(storagePath: string) {
+type SignedImageTransform = {
+  width?: number;
+  height?: number;
+  resize?: "cover" | "contain" | "fill";
+  quality?: number;
+  format?: "origin";
+};
+
+async function signedImageUrl(storagePath: string, transform?: SignedImageTransform) {
   const supabase = getSupabaseAdmin();
 
   if (!supabase || !storagePath) {
     return "";
   }
 
-  const { data, error } = await supabase.storage.from(env.storageBucket).createSignedUrl(storagePath, 3600);
+  const { data, error } = await supabase.storage.from(env.storageBucket).createSignedUrl(storagePath, 3600, transform ? { transform } : undefined);
 
   if (error) {
+    if (transform) {
+      return signedImageUrl(storagePath);
+    }
+
     return "";
   }
 

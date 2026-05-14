@@ -31,6 +31,7 @@ export type CharacterRecord = {
   mime_type: string;
   storage_path?: string;
   image_url: string;
+  preview_url?: string;
   status: CharacterStatus;
   profile: CharacterProfile;
   search_document: string;
@@ -51,6 +52,7 @@ export type CharacterSheetRecord = {
   prompt: string;
   storage_path?: string | null;
   image_url?: string;
+  preview_url?: string;
   file_name: string;
   mime_type: string;
   generation_model?: string | null;
