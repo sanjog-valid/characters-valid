@@ -718,6 +718,7 @@ function CharacterGrid({
 function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord | null; onDeleted: (id: string) => void }) {
   const profile = character ? safeProfile(character.profile) : null;
   const [sheet, setSheet] = useState<CharacterSheetRecord | null>(null);
+  const [sheetLookup, setSheetLookup] = useState<{ characterId: string | null; checked: boolean }>({ characterId: null, checked: false });
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetAction, setSheetAction] = useState(false);
   const [sheetDownloading, setSheetDownloading] = useState(false);
@@ -726,12 +727,15 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
   const [downloading, setDownloading] = useState(false);
   const [deleteState, setDeleteState] = useState<"idle" | "confirming" | "deleting">("idle");
   const [deleteError, setDeleteError] = useState("");
+  const activeSheet = character?.id && sheet?.character_id === character.id ? sheet : null;
+  const isCheckingSheet = Boolean(character?.id && character.status === "ready" && (sheetLookup.characterId !== character.id || !sheetLookup.checked || sheetLoading));
 
   useEffect(() => {
     setCopyState("idle");
     setDeleteState("idle");
     setDeleteError("");
     setSheet(null);
+    setSheetLookup({ characterId: character?.id || null, checked: false });
     setSheetError("");
     setSheetAction(false);
     setSheetDownloading(false);
@@ -747,6 +751,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
 
     async function loadSheet() {
       setSheetLoading(true);
+      setSheetLookup({ characterId, checked: false });
 
       try {
         const response = await fetch(`/api/character-sheets?characterId=${encodeURIComponent(characterId)}`);
@@ -758,10 +763,12 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
 
         if (!cancelled) {
           setSheet(payload.sheet || null);
+          setSheetLookup({ characterId, checked: true });
         }
       } catch (error) {
         if (!cancelled) {
           setSheetError(error instanceof Error ? error.message : "Could not load character sheet.");
+          setSheetLookup({ characterId, checked: true });
         }
       } finally {
         if (!cancelled) {
@@ -778,7 +785,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
   }, [character?.id]);
 
   useEffect(() => {
-    if (!character?.id || sheet?.status !== "generating") {
+    if (!character?.id || activeSheet?.status !== "generating") {
       return;
     }
 
@@ -789,6 +796,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
 
         if (response.ok) {
           setSheet(payload.sheet || null);
+          setSheetLookup({ characterId: character.id, checked: true });
         }
       } catch {
         // Manual refresh or the next poll can recover this transient state.
@@ -796,7 +804,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
     }, 6000);
 
     return () => window.clearInterval(handle);
-  }, [character?.id, sheet?.status]);
+  }, [character?.id, activeSheet?.status]);
 
   if (!character || !profile) {
     return (
@@ -842,12 +850,12 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
       return;
     }
 
-    if (sheet?.status === "ready") {
+    if (activeSheet?.status === "ready") {
       setSheetDownloading(true);
       setSheetError("");
 
       try {
-        await downloadCharacterSheet(character, sheet);
+        await downloadCharacterSheet(character, activeSheet);
       } catch (error) {
         setSheetError(error instanceof Error ? error.message : "Character sheet download failed.");
       } finally {
@@ -875,6 +883,7 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
       }
 
       setSheet(payload.sheet || null);
+      setSheetLookup({ characterId: character.id, checked: true });
     } catch (error) {
       setSheetError(error instanceof Error ? error.message : "Character sheet generation failed.");
     } finally {
@@ -929,15 +938,24 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
           fetchPriority="high"
         />
       </div>
-      {sheet?.status === "ready" && sheet.image_url ? (
+      {activeSheet?.status === "ready" && activeSheet.image_url ? (
         <div className="border-t bg-secondary/50 p-2">
           <img
             className="aspect-video w-full rounded-md border bg-background object-contain"
-            src={sheet.preview_url || sheet.image_url}
+            src={activeSheet.preview_url || activeSheet.image_url}
             alt={`${profile.summary} character sheet`}
             loading="eager"
             decoding="async"
           />
+        </div>
+      ) : isCheckingSheet || activeSheet?.status === "generating" ? (
+        <div className="border-t bg-secondary/50 p-2">
+          <div className="grid aspect-video w-full place-items-center rounded-md border bg-background">
+            <div className="grid place-items-center gap-2 text-xs font-semibold text-muted-foreground">
+              <Loader2 className="spin size-4" />
+              <span>{activeSheet?.status === "generating" ? "Generating character sheet" : "Checking character sheet"}</span>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -960,13 +978,13 @@ function CharacterDrawer({ character, onDeleted }: { character: CharacterRecord 
           </Button>
           <Button
             className="h-8 px-2.5 text-xs"
-            variant={sheet?.status === "ready" ? "outline" : "secondary"}
+            variant={activeSheet?.status === "ready" ? "outline" : "secondary"}
             type="button"
             onClick={makeOrDownloadCharacterSheet}
-            disabled={character.status !== "ready" || sheetLoading || sheetAction || sheetDownloading || sheet?.status === "generating"}
+            disabled={character.status !== "ready" || sheetLoading || sheetAction || sheetDownloading || activeSheet?.status === "generating"}
           >
-            {sheetAction || sheetDownloading || sheet?.status === "generating" ? <Loader2 className="spin" /> : sheet?.status === "ready" ? <Download /> : <ImagePlus />}
-            {characterSheetButtonLabel({ sheet, sheetLoading, sheetAction, sheetDownloading })}
+            {sheetAction || sheetDownloading || activeSheet?.status === "generating" ? <Loader2 className="spin" /> : activeSheet?.status === "ready" ? <Download /> : <ImagePlus />}
+            {characterSheetButtonLabel({ sheet: activeSheet, sheetLoading, sheetAction, sheetDownloading })}
           </Button>
           <Button className="h-8 px-2.5 text-xs" variant="outline" type="button" onClick={copyReferenceImage}>
             {copyState === "copied" ? <Check /> : <Copy />}
